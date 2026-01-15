@@ -1,0 +1,1 @@
+{"data":{"attachmentkeynames":["rs"],"cmd":"data","ctl":"audio","desc":"","import":"use serde::{Deserialize, Serialize};\nuse std::collections::HashMap;\n","lib":"hollis","params":[],"returntype":"JSONObject","type":"rust"},"id":"nivmwo19b9d344142x86c","readers":[],"time":1768484925262,"username":"system","writers":[]}

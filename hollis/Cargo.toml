@@ -1,0 +1,26 @@
+[package]
+name = "hollis"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["dylib"]
+
+[dependencies]
+num-complex = "0.4"
+attohttpc = { version = "0.26.1", features = ["json"] }
+rustfft = "6.1"
+crossbeam-channel = "0.5"
+chrono = "0.4"
+crossterm = "0.29.0"
+whisper-rs = { version="0.15.1", features=["cuda"] }
+cpal = "0.16.0"
+flowlang = { version="0.3.28", features = ["serde_support"] }
+ndata = { version="0.3.16", features = ["serde_support"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0" }
+
+[features]
+reload = []
+default = []
+serde_support = []
