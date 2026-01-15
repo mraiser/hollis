@@ -36,7 +36,7 @@ This repository includes a bootstrap script to set up the Newbound environment a
 
 ## 🧠 Model Setup (Required)
 
-Hollis runs the speech recognition model locally. **You must download the model file manually** before the transcription features will work.
+Hollis runs the speech recognition model locally. **You must either install with the install.sh script or download the model file manually** before the transcription features will work.
 
 1.  **Download the Model:**
     Get the `ggml-medium.en.bin` model (compatible with `whisper.cpp`).
