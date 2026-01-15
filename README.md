@@ -24,7 +24,7 @@ This repository includes a bootstrap script to set up the Newbound environment a
 
 1.  Clone this repository:
     ```bash
-    git clone [https://github.com/mraiser/hollis.git](https://github.com/mraiser/hollis.git)
+    git clone https://github.com/mraiser/hollis.git
     cd hollis
     ```
 
