@@ -34,7 +34,7 @@ This repository includes a bootstrap script to set up the Newbound environment a
     ```
     *This script will fetch the necessary Newbound core dependencies, compile the project, and launch the application.*
 
-## 🧠 Model Setup (Required)
+## 🧠 Model Setup (If not using the install script)
 
 Hollis runs the speech recognition model locally. **You must either install with the install.sh script or download the model file manually** before the transcription features will work.
 
