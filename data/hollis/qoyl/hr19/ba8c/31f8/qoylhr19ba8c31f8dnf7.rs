@@ -2,98 +2,73 @@ DataObject::new()
 }
 
 pub enum TranscriberMessage {
-  AudioChunk { 
-    samples: Vec<f32>, 
-    sample_rate: u32 
-  },
-  EndOfSpeech { 
-    sensor_id: String, 
-    timestamp: u64 
-  },
+  AudioChunk { track_id: String, samples: Vec<f32>, sample_rate: u32 },
+  EndOfSpeech { track_id: String, timestamp: u64, location: Point3D }, // <--- USE 3D POINT
 }
-
 pub struct Transcriber {
-  ctx: Arc<WhisperContext>,
+  model_path: String,
 }
 
 impl Transcriber {
-  // Constructor loads the model synchronously
+  // We no longer need to load the heavy context here. 
+  // We just store the path and load it in the worker thread.
   pub fn new(model_path: String) -> Self {
-    let ctx = Arc::new(WhisperContext::new_with_params(
-      &model_path, 
-      whisper_rs::WhisperContextParameters::default()
-      ).expect("failed to load whisper model"));
-    
-    whisper_rs::install_logging_hooks();
-
-    Transcriber { ctx }
+    Transcriber { model_path }
   }
 
-  // Spawn takes 'self' to move the loaded context into the thread
   pub fn spawn(self, rx: Receiver<TranscriberMessage>, event_tx: Sender<SemanticEvent>) -> thread::JoinHandle<()> {
-    let ctx = self.ctx; // Move Arc into the thread
 
     thread::spawn(move || {
-      let mut audio_buffer: Vec<f32> = Vec::new();
+      println!("Loading Moonshine STT from {}...", self.model_path);
+      let mut model = MoonshineModel::load(
+        &PathBuf::from(&self.model_path),
+        MoonshineVariant::Base, 
+        &Quantization::default() 
+      ).expect("Failed to load Moonshine model");
 
+      // --- THE MULTI-TRACK MIXER ---
+      let mut active_tracks: std::collections::HashMap<String, Vec<f32>> = std::collections::HashMap::new();
+      let options = MoonshineParams::default();
+
+      // 2. The Transcription Loop
       while let Ok(msg) = rx.recv() {
         match msg {
-          TranscriberMessage::AudioChunk { samples, sample_rate } => {
-            if sample_rate != 16000 {
-              let resampled = linear_resample(&samples, sample_rate, 16000);
-              audio_buffer.extend(resampled);
+          TranscriberMessage::AudioChunk { track_id, samples, sample_rate } => {
+            // Resample to 16kHz if necessary
+            let resampled = if sample_rate != 16000 {
+              linear_resample(&samples, sample_rate, 16000)
             } else {
-              audio_buffer.extend(samples);
-            }
+              samples
+            };
+
+            // Append the audio to the correct spatial track!
+            active_tracks.entry(track_id).or_insert_with(Vec::new).extend(resampled);
           },
-          TranscriberMessage::EndOfSpeech { sensor_id, timestamp } => {
-            if !audio_buffer.is_empty() {
-              //println!("Transcribing {} samples...", audio_buffer.len());
-              if let Some(text) = process_audio(&audio_buffer, &ctx) {
-                //println!(">>> Transcript: \"{}\"", text);
-                if let Err(_) = event_tx.send(SemanticEvent {
-                  start_timestamp: timestamp,
-                  end_timestamp: None,
-                  sources: vec![sensor_id],
-                  kind: EventKind::Transcript { text },
-                  fingerprint: vec![],
-                  angle: None,
-                }) {
-                  eprintln!("[Transcriber] Warning: Cortex channel closed. Transcript dropped.");
-                  break; // Stop the thread if there is nobody listening
+
+          TranscriberMessage::EndOfSpeech { track_id, timestamp, location } => { // <--- GRAB IT
+            if let Some(audio_buffer) = active_tracks.remove(&track_id) {
+              if audio_buffer.len() >= 320 {
+                if let Ok(result) = model.transcribe_with(&audio_buffer, &options) {
+                  let text = result.text.trim().to_string();
+                  if !text.is_empty() && !text.starts_with("[") {
+                    let _ = event_tx.send(SemanticEvent {
+                      start_timestamp: timestamp,
+                      end_timestamp: None,
+                      sources: vec![track_id], 
+                      kind: EventKind::Transcript { text },
+                      fingerprint: vec![],
+                      location: Some(location), // <--- HAND TO CORTEX
+                    });
+                  }
                 }
               }
-              audio_buffer.clear();
             }
+          
           }
         }
       }
     })
   }
-}
-
-fn process_audio(samples: &[f32], ctx: &Arc<WhisperContext>) -> Option<String> {
-  let mut state = ctx.create_state().ok()?;
-  let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-
-  if samples.len() < 320 { return None; } 
-  state.full(params, samples).ok()?;
-
-  let num_segments = state.full_n_segments(); 
-  let mut full_text = String::new();
-
-  for i in 0..num_segments {
-    if let Some(segment) = state.get_segment(i) {
-      full_text.push_str(&segment.to_string()); 
-      full_text.push(' ');
-    }
-  }
-
-  let text = full_text.trim().to_string();
-  if text.is_empty() || text == "Thanks for watching!" || text.starts_with("[") {
-    return None;
-  }
-  Some(text)
 }
 
 fn linear_resample(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {

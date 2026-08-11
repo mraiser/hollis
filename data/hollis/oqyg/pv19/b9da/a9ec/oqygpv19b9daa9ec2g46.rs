@@ -8,18 +8,21 @@ match g.has(RUNPARAM) && g.get_boolean(RUNPARAM) {
     let meta = g.get_object("system").get_object("apps").get_object("hollis").get_object("runtime");
     let ear_left = match meta.has("mic1") { true => meta.get_string("mic1"), _ => "default".to_string() };
     let ear_right = match meta.has("mic2") { true => Some(meta.get_string("mic2")), _ => None };
-    let model_path = match meta.has("model") { true => meta.get_string("model"), _ => "models/ggml-medium.en.bin".to_string() };
+    let loopback_dev = match meta.has("loopback") { true => Some(meta.get_string("loopback")), _ => None };
+    let model_path = match meta.has("model") { true => meta.get_string("model"), _ => "/newbound/models/moonshine-base".to_string() };
     let memory_file = match meta.has("memory_file") { true => meta.get_string("memory_file"), _ => "hollis_memory.json".to_string() };
     let mic_distance = match meta.has("mic_distance") { true => meta.get_string("mic_distance").parse().unwrap(), _ => 0.6 };
 
     g.put_boolean(RUNPARAM, true);
 
-    let (audio_tx, audio_rx) = crossbeam_channel::bounded(50);
-    // Event channel: Both Perception AND Transcriber write to this
-    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+   // 1. The Raw Audio Pipe
+    let (sync_tx, sync_rx) = crossbeam_channel::bounded::<SynchronizedArrayFrame>(50);
+    
+    // 2. The Brain's Event Pipe
+    let (event_tx, event_rx) = crossbeam_channel::unbounded::<SemanticEvent>();
 
-    // Transcriber channel: Perception writes to this
-    let (transcribe_tx, transcribe_rx) = crossbeam_channel::unbounded();
+    // 3. The Transcriber's Audio Pipe
+    let (transcribe_tx, transcribe_rx) = crossbeam_channel::unbounded::<TranscriberMessage>();
 
     println!("Initializing Hollis...");
     println!("Config: Model='{}', Memory='{}', MicDist={:.2}m", model_path, memory_file, mic_distance);
@@ -30,12 +33,11 @@ match g.has(RUNPARAM) && g.get_boolean(RUNPARAM) {
     let t_handle = transcriber.spawn(transcribe_rx, event_tx.clone());
 
     // 2. Spawn Cortex
-    let c_handle = Cortex::spawn(event_rx, memory_file);
+    let c_handle = Cortex::spawn(event_rx, event_tx.clone(), memory_file);
 
     // 3. Spawn Perception
-    // Note: We pass Some(transcribe_tx) now
     let p_handle = PerceptionEngine::spawn(
-      audio_rx, 
+      sync_rx,
       event_tx, 
       Some(transcribe_tx),
       mic_distance as f32,
@@ -50,28 +52,30 @@ match g.has(RUNPARAM) && g.get_boolean(RUNPARAM) {
       None => false,
     };
 
-    // 4. Spawn Sensors
+    // 4. Spawn Sensors 
+    
+    // Step A: Build the 6-channel Radar Dish and patch the physical hardware into it
+    crate::hollis::audio::sensor::setup_hardware_routing();
 
-    // Ear 1 (Left / Ch 0)
-    let _sensor_left = crate::hollis::audio::sensor::AudioSensor::new(
-      "ear_left".to_string(), 
-      ear_left.clone(),
-      if is_stereo_pair { Some(0) } else { None }, // Force Ch0 if stereo pair
-      audio_tx.clone()
-    ).expect("Left Ear failed");
-
-    // Ear 2 (Right / Ch 1)
-    let _sensor_right = match ear_right {
-      Some(name) => crate::hollis::audio::sensor::AudioSensor::new(
-        "ear_right".to_string(), 
-        name,
-        if is_stereo_pair { Some(1) } else { None }, // Force Ch1 if stereo pair
-        audio_tx
-      ).ok(),
-      _ => None
-    };
-
+    // Step C: Spawn the SINGLE Master Sensor Array (2 Loopback, 5 Physical Mics)
+    let _master_sensor = crate::hollis::audio::sensor::MasterSensorArray::new(
+        "default", 
+        2, 
+        5, // <--- CHANGED TO 5
+        sync_tx
+    ).expect("Failed to initialize Master Sensor Array");
+    
     println!("Hollis Cortex Active.");
+    
+    println!("Initiating Acoustic Calibration...");
+    // Fire an asynchronous 50ms square wave "Pop". 
+    // The sharp leading edge acts as an acoustic needle for alignment.
+    std::thread::spawn(|| {
+      std::thread::sleep(std::time::Duration::from_millis(1500)); 
+      let _ = std::process::Command::new("play")
+      .args(["-n", "synth", "0.05", "square", "2000"])
+      .output();
+    });
 
     thread::spawn(move || {
       let beat = std::time::Duration::from_secs(1);
@@ -79,10 +83,9 @@ match g.has(RUNPARAM) && g.get_boolean(RUNPARAM) {
 
       println!("Stopping threads...");
 
-      // 1. Drop the sensor to close audio_tx
+      // 1. Drop the sensor array and loopback to close audio_tx
       // This causes Perception to finish -> Closes transcribe_tx -> Transcriber finishes
-      drop(_sensor_left);
-      drop(_sensor_right);
+      drop(_master_sensor);
 
       // 2. Wait for the threads to unwind and finish
       if let Err(e) = p_handle.join() { eprintln!("Error joining Perception: {:?}", e); }
@@ -105,14 +108,16 @@ pub struct Cortex {
   next_entity_id: u64, 
   conversation_buffer: Vec<(u64, u64, String)>,
   last_transcript_time: u64,
-  memory_file: String,  
+  store: DataStore,
+  event_tx: crossbeam_channel::Sender<SemanticEvent>,  
 }
 
 impl Cortex {
-  pub fn spawn(rx: Receiver<SemanticEvent>, memory_file: String) -> thread::JoinHandle<()> {
+  pub fn spawn(rx: Receiver<SemanticEvent>, event_tx: crossbeam_channel::Sender<SemanticEvent>, memory_file: String) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-      // 1. Try to load existing memory from disk
-      let (loaded_history, next_id) = Self::load_memory(&memory_file);
+      // 1. Try to load existing memory from DataStore
+      let store = DataStore::new();
+      let (loaded_history, next_id) = Self::load_memory(&store);
 
       let mut cortex = Cortex {
         state: WorldState {
@@ -125,7 +130,8 @@ impl Cortex {
         next_entity_id: next_id,
         conversation_buffer: Vec::new(),
         last_transcript_time: 0,
-        memory_file,
+        store,
+        event_tx,
       };
 
       println!("Cortex Online. Known Entities: {}", cortex.history.len());
@@ -136,7 +142,12 @@ impl Cortex {
   fn run(&mut self, rx: Receiver<SemanticEvent>) {
     let mut last_save = SystemTime::now();
 
+    let g = DataStore::globals();
     loop {
+      if !g.get_boolean("HOLLIS_CORTEX_RUNNING") {
+          break;
+      }
+      
       // 1. Wait for events (with a timeout so we can run maintenance tasks)
       match rx.recv_timeout(Duration::from_millis(100)) {
         Ok(event) => self.handle_event(event),
@@ -144,6 +155,8 @@ impl Cortex {
           // No events? Good time to clean up memory.
           self.prune_stale_entities();
           //self.print_world_state();
+          
+          self.cluster_identities();
 
           // Auto-save every 10 seconds
           if last_save.elapsed().unwrap_or_default() > Duration::from_secs(10) {
@@ -161,6 +174,14 @@ impl Cortex {
 
   fn handle_event(&mut self, event: SemanticEvent) {
     let now = event.start_timestamp;
+    
+    // Do not assign 3D physical entities to internal LLM context updates
+    if let EventKind::ContextUpdate(briefing) = event.kind {
+        self.state.context.insert(briefing.domain.clone(), briefing);
+        self.update_occupancy_context(); // Optional, but keeps state fresh
+        return; 
+    }
+    
     let entity_id = self.identify_entity(&event); // Renamed from find_or_create
 
     // Update the entity (whether it's Active or revived from History)
@@ -179,16 +200,18 @@ impl Cortex {
         println!(">> Entity #{} said: \"{}\"", entity_id, text);
         let text_content = text.clone();
 
-        // Write to log (Existing logic)
-        let logfile = DataStore::new().root.parent().unwrap().join("runtime").join("hollis").join("transcript.txt");
-        match OpenOptions::new().write(true).create(true).append(true).open(&logfile) {
-          Ok(mut file) => {
-            if let Err(e) = file.write_all((text_content + "\n").as_bytes()) {
-              eprintln!("Failed to write log entry: {}", e);
-            }
-          },
-          Err(e) => eprintln!("Failed to open log file: {}", e),
-        };
+        // 1. Build the inner DataObject
+        let mut transcript_data = ndata::dataobject::DataObject::new();
+        transcript_data.put_int("timestamp", now as i64);
+        transcript_data.put_int("entity_id", entity_id as i64);
+        transcript_data.put_string("text", &text_content);
+
+        // 2. Wrap it in the required "data" envelope
+        let mut envelope = ndata::dataobject::DataObject::new();
+        envelope.put_object("data", transcript_data); 
+
+        // 3. Save to DataStore! 
+        self.store.set_data("hollis_transcripts", &now.to_string(), envelope);
 
         self.analyze_transcript(entity_id, text.clone());
       },
@@ -265,27 +288,32 @@ impl Cortex {
     );
 
     let prompt = format!("TRANSCRIPT:\n{}\n\nCURRENT CONTEXT:", transcript_block);
+    let event_tx = self.event_tx.clone(); // Clone the channel for the thread
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
 
-    if let Ok(api) = std::panic::catch_unwind(|| crate::api::new()) {
-      let response = ask_llm(prompt, Data::DString(system_prompt)); // Note: system_prompt is now a String, not &str
-      let summary = response.trim().to_string();
+    // Fire and forget! The Cortex loop keeps running instantly.
+    thread::spawn(move || {
+      if let Ok(api) = std::panic::catch_unwind(|| crate::api::new()) {
+        let response = ask_llm(prompt, Data::DString(system_prompt));
+        let summary = response.trim().to_string();
 
-      // 4. Update Situation Room
-      let old_summary = self.state.context.get("Discourse")
-      .map(|b| b.summary.clone())
-      .unwrap_or_default();
-
-      if summary != old_summary {
-        println!(">>> CONTEXT SHIFT (Discourse): {}", summary);
-        self.state.context.insert("Discourse".to_string(), ContextBriefing {
-          domain: "Discourse".to_string(),
-          summary,
-          confidence: 0.9,
-          urgency: 1,
-          timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64,
+        // Send the result back to the Cortex main loop via the event channel
+        let _ = event_tx.send(SemanticEvent {
+          start_timestamp: now,
+          end_timestamp: None,
+          sources: vec!["llm_reasoning".to_string()],
+          kind: EventKind::ContextUpdate(ContextBriefing {
+            domain: "Discourse".to_string(),
+            summary,
+            confidence: 0.9,
+            urgency: 1,
+            timestamp: now,
+          }),
+          fingerprint: vec![],
+          location: None,
         });
       }
-    }
+    });
   }
 
   fn update_entity_stats(entity: &mut Entity, event: &SemanticEvent) {
@@ -293,7 +321,6 @@ impl Cortex {
     entity.last_heard = event.start_timestamp;
 
     match event.kind {
-      // [RESTORED] This was missing in the previous update!
       EventKind::Transient { ref label, .. } => {
         println!("Entity #{} made a noise: {}", entity.id, label);
       },
@@ -307,34 +334,35 @@ impl Cortex {
       _ => {}
     }
 
-    // LEARN: Kalman / Alpha-Beta Filter
+    // LEARN: 3D Kalman / Alpha-Beta Filter
     if !event.fingerprint.is_empty() {
-      // [Cite: 282, 283] Extract Measured Angle (Last element)
-      let measured_angle = event.angle.unwrap_or(0.0);
-      let xm = measured_angle.sin();
-      let ym = measured_angle.cos();
+      let loc = event.location.unwrap_or(entity.position);
 
       if dt > 0.0 && dt < 2.0 {
-        // Alpha-Beta Filter
+        // Alpha-Beta Filter for 3D Space
         let alpha = 0.85;
         let beta = 0.20;
 
         let xp = entity.position.x + entity.velocity.dx * dt;
         let yp = entity.position.y + entity.velocity.dy * dt;
+        let zp = entity.position.z + entity.velocity.dz * dt;
 
-        let rx = xm - xp;
-        let ry = ym - yp;
+        let rx = loc.x - xp;
+        let ry = loc.y - yp;
+        let rz = loc.z - zp;
 
         entity.position.x = xp + alpha * rx;
         entity.position.y = yp + alpha * ry;
+        entity.position.z = zp + alpha * rz;
 
         entity.velocity.dx = entity.velocity.dx + (beta / dt) * rx;
         entity.velocity.dy = entity.velocity.dy + (beta / dt) * ry;
+        entity.velocity.dz = entity.velocity.dz + (beta / dt) * rz;
       } else {
-        entity.position.x = xm;
-        entity.position.y = ym;
+        entity.position = loc;
         entity.velocity.dx *= 0.1; 
         entity.velocity.dy *= 0.1;
+        entity.velocity.dz *= 0.1;
       }
 
       // Update Signature
@@ -352,58 +380,39 @@ impl Cortex {
   fn identify_entity(&mut self, event: &SemanticEvent) -> u64 {
     let mut best_match = None;
     let mut best_score = 0.0;
-
-    // Debug info
     let mut best_components = (0.0, 0.0, 0.0); 
     let mut debug_dt = 0.0;
-    let mut debug_bio_err = String::new();
 
     let input_spectrum = &event.fingerprint;
-    let input_angle = event.angle.unwrap_or(0.0);
+    // Default to origin if no location provided
+    let input_loc = event.location.unwrap_or(Point3D::new(0.0, 0.0, 0.0));
 
-    // Helper closure to calculate bio score
     let mut calc_bio = |entity: &Entity| -> f32 {
-      if !entity.signature.is_empty() {
-        if entity.signature.len() != input_spectrum.len() {
-          if debug_bio_err.is_empty() { 
-            debug_bio_err = format!("Len Mismatch: Ent {} vs In {}", entity.signature.len(), input_spectrum.len());
-          }
-          0.0
-        } else {
+      if !entity.signature.is_empty() && entity.signature.len() == input_spectrum.len() {
           cosine_similarity(&entity.signature, input_spectrum)
-        }
-      } else {
-        0.0
-      }
+      } else { 0.0 }
     };
 
-    // 1. Active Entities (Full Spatial + Temporal Logic)
+    // 1. Active Entities
     for entity in self.state.entities.values() {
       let dt = (event.start_timestamp as i64 - entity.last_heard as i64) as f32 / 1_000_000.0;
 
-      // Prediction
-      let (pred_x, pred_y) = if dt > 0.0 && dt < 5.0 {
-        (
+      let pred_loc = if dt > 0.0 && dt < 5.0 {
+        Point3D::new(
           entity.position.x + entity.velocity.dx * dt,
-          entity.position.y + entity.velocity.dy * dt
+          entity.position.y + entity.velocity.dy * dt,
+          entity.position.z + entity.velocity.dz * dt
         )
-      } else {
-        (entity.position.x, entity.position.y)
-      };
-      let pred_angle = pred_x.atan2(pred_y);
+      } else { entity.position };
 
-      // Biometrics
       let bio_score = calc_bio(entity);
+      let spatial_diff = input_loc.distance(&pred_loc); 
 
-      // Spatial
-      let angle_diff = (input_angle - pred_angle).abs();
+      // Hard Gate: Relaxed to 1.5 since ratio-space max distance is ~3.4
+      if spatial_diff > 1.5 { continue; }
 
-      // Hard Gate: If an active entity is physically far away, it's not them.
-      if angle_diff > 0.8 { continue; }
-
-      let spatial_bonus = if angle_diff < 0.3 { 0.5 } else { 0.0 };
+      let spatial_bonus = if spatial_diff < 0.5 { 0.5 } else { 0.0 };
       let time_bonus = if dt < 3.0 { 0.2 } else { 0.0 };
-
       let total_score = bio_score + spatial_bonus + time_bonus;
 
       if total_score > best_score {
@@ -414,40 +423,33 @@ impl Cortex {
       }
     }
 
-    // 2. Historical Entities (Biometrics Only)
-    // We ignore position because they could have moved while "sleeping".
+    // 2. Historical Entities
     for entity in self.history.values() {
       let bio_score = calc_bio(entity);
-
-      // Score is purely biometric (0.0 to 1.0)
-      let total_score = bio_score; 
-
-      if total_score > best_score {
-        best_score = total_score;
+      if bio_score > best_score {
+        best_score = bio_score;
         best_match = Some(entity.id);
         best_components = (bio_score, 0.0, 0.0);
-        debug_dt = 999.0; // Stale
+        debug_dt = 999.0;
       }
     }
 
     if best_score > 0.45 {
       let id = best_match.unwrap();
-      // [DEBUG] Now printing Time Bonus and DT
+      // RESTORED DEBUG LOG
       println!("> Matched #{} (Score: {:.2} [Bio:{:.2} Spc:{:.2} Tim:{:.2}], dt:{:.2}s)", 
         id, best_score, best_components.0, best_components.1, best_components.2, debug_dt);
-      return id;
+      return id; 
     }
 
-    // New Entity Creation
+    // 3. New Entity Creation
     let id = self.next_entity_id;
     self.next_entity_id += 1;
-    let x = input_angle.sin();
-    let y = input_angle.cos();
 
     let new_entity = Entity {
       id,
       label: format!("Entity #{}", id),
-      position: Point3D::new(x, y, 0.0),
+      position: input_loc,
       velocity: Vector3D {dx:0.0, dy:0.0, dz:0.0},
       last_heard: event.start_timestamp,
       signature: event.fingerprint.clone(), 
@@ -455,33 +457,121 @@ impl Cortex {
     };
     self.state.entities.insert(id, new_entity);
 
-    // [DEBUG] Print Bio Error if it exists
-    let err_msg = if !debug_bio_err.is_empty() { format!(" ({})", debug_bio_err) } else { "".to_string() };
-
-    println!(">>> New Entity Detected: #{} (Score: {:.2}, Angle: {:.2}){}", 
-      id, best_score, input_angle, err_msg);
+    // RESTORED DEBUG LOG
+    println!(">>> New Entity Detected: #{} (Score: {:.2}, Loc: [{:.2}, {:.2}, {:.2}])", 
+      id, best_score, input_loc.x, input_loc.y, input_loc.z);
 
     id
   }
 
   fn prune_stale_entities(&mut self) {
-    // Move from Active -> History
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
-    let timeout = 30_000_000; // 30s
-
+    let active_timeout = 30_000_000; // 30s
+    
     let stale_ids: Vec<u64> = self.state.entities.iter()
-    .filter(|(_, e)| (now - e.last_heard) > timeout)
+    .filter(|(_, e)| (now - e.last_heard) > active_timeout)
     .map(|(&id, _)| id)
     .collect();
 
     for id in stale_ids {
       if let Some(e) = self.state.entities.remove(&id) {
-        //println!(">>> Entity #{} stored in memory.", id);
+        // FLUSH TO DISK AS IT GOES TO SLEEP
+        save_entity_to_datastore(&self.store, &e); 
         self.history.insert(id, e);
       }
     }
-  }
 
+    // 2. Permanent Garbage Collection (The Memory Leak Fix)
+    let history_timeout = 86_400_000_000; // 24 hours in microseconds
+    
+    self.history.retain(|_, e| {
+      let time_in_history = now - e.last_heard;
+      
+      // Delete if it has been silent for more than 24 hours
+      if time_in_history > history_timeout { return false; }
+      
+      // Delete if it has been silent for over an hour AND only ever made 1 sound 
+      // (This purges random chair squeaks and dropped books)
+      if time_in_history > 3_600_000_000 && e.signature_count <= 1 { return false; }
+      
+      true // Keep it!
+    });
+  } 
+
+  fn cluster_identities(&mut self) {
+    // 1. Gather all entities (Active + History) to compare
+    let mut all_entities: Vec<Entity> = self.state.entities.values().cloned().collect();
+    all_entities.extend(self.history.values().cloned());
+    
+    let mut merges: Vec<(u64, u64)> = Vec::new();
+    
+    // 2. Compare everyone against everyone
+    for i in 0..all_entities.len() {
+        for j in (i + 1)..all_entities.len() {
+            let a = &all_entities[i];
+            let b = &all_entities[j];
+            
+            // Biometric Similarity (MFCC Voiceprint)
+            let bio_score = cosine_similarity(&a.signature, &b.signature);
+            // Spatial Similarity (Distance in meters)
+            let spatial_diff = a.position.distance(&b.position);
+            
+            // THE THRESHOLD: High voice match (> 88%) AND physically close (< 0.5m)
+            if bio_score > 0.88 && spatial_diff < 0.5 {
+                let survivor = std::cmp::min(a.id, b.id);
+                let duplicate = std::cmp::max(a.id, b.id);
+                
+                if !merges.contains(&(survivor, duplicate)) {
+                    merges.push((survivor, duplicate));
+                }
+            }
+        }
+    }
+    
+    if merges.is_empty() { return; }
+    
+    // 3. Apply the merges!
+    for (survivor_id, duplicate_id) in merges {
+        println!(">>> CLUSTERING: Merging fragmented Entity #{} into true Entity #{}", duplicate_id, survivor_id);
+        
+        // Grab the duplicate's latest data before we delete it
+        let duplicate_last_heard = self.state.entities.get(&duplicate_id)
+            .or(self.history.get(&duplicate_id))
+            .map(|e| e.last_heard).unwrap_or(0);
+            
+        let duplicate_pos = self.state.entities.get(&duplicate_id)
+            .or(self.history.get(&duplicate_id))
+            .map(|e| e.position.clone());
+
+        // Remove the duplicate from live memory and history
+        self.state.entities.remove(&duplicate_id);
+        self.history.remove(&duplicate_id);
+
+        // EXORCISE THE GHOST: Delete the orphan file from the DataStore
+        let duplicate_path = self.store.get_data_file("hollis_entities", &duplicate_id.to_string());
+        if duplicate_path.exists() {
+            let _ = std::fs::remove_file(duplicate_path);
+        }
+
+        // Update the survivor's timestamps and location so it stays alive!
+        if let Some(survivor) = self.state.entities.get_mut(&survivor_id).or_else(|| self.history.get_mut(&survivor_id)) {
+            if duplicate_last_heard > survivor.last_heard {
+                survivor.last_heard = duplicate_last_heard;
+                if let Some(pos) = duplicate_pos {
+                    survivor.position = pos;
+                }
+            }
+            // Flush the updated survivor to disk immediately
+            save_entity_to_datastore(&self.store, survivor);
+        }
+        
+        // Update the live LLM context buffer so Discourse Briefings are accurate
+        for entry in &mut self.conversation_buffer {
+            if entry.1 == duplicate_id { entry.1 = survivor_id; }
+        }
+    }
+  }
+  
   fn update_occupancy_context(&mut self) {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
     let timeout = 60_000_000; // 60 seconds
@@ -533,37 +623,151 @@ impl Cortex {
     }
   }
 
-  fn load_memory(filename: &str) -> (HashMap<u64, Entity>, u64) {
-    let memfile = DataStore::new().root.parent().unwrap().join("runtime").join("hollis").join(filename);
-    if let Ok(file) = File::open(memfile) {
-      let reader = BufReader::new(file);
-      if let Ok(history) = serde_json::from_reader::<_, HashMap<u64, Entity>>(reader) {
-        // Find the highest ID so we don't reuse IDs
-        let max_id = history.keys().max().unwrap_or(&0) + 1;
-        return (history, max_id);
+  fn load_memory(store: &DataStore) -> (HashMap<u64, Entity>, u64) {
+    use std::fs;
+    use std::path::Path;
+
+    let mut history = HashMap::new();
+    let mut max_id = 0;
+    
+    // The base directory where DataStore keeps our sharded entities
+    let base_dir = store.root.join("hollis_entities");
+    
+    if base_dir.exists() {
+      // Helper function to recursively walk the sharded DataStore directories
+      fn walk_dir(dir: &Path, store: &DataStore, history: &mut HashMap<u64, Entity>, max_id: &mut u64) {
+        if let Ok(entries) = fs::read_dir(dir) {
+          for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+              walk_dir(&path, store, history, max_id);
+            } else if path.is_file() {
+              // In DataStore, the deepest file is named exactly the ID
+              if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                if let Ok(id) = filename.parse::<u64>() {
+                  // Track the highest ID so we don't accidentally overwrite someone
+                  if id > *max_id { *max_id = id; }
+                  
+                  // Use our new DataStore loader!
+                  if let Some(entity) = load_entity_from_datastore(store, id) {
+                    history.insert(id, entity);
+                  }
+                }
+              }
+            }
+          }
+        }
       }
+      
+      walk_dir(&base_dir, store, &mut history, &mut max_id);
     }
-    (HashMap::new(), 1)
+    
+    // Next ID is always one higher than the highest we found
+    (history, max_id + 1)
   }
 
   fn save_memory(&self) {
-    // We save BOTH active entities and history to ensure nothing is lost on crash
-    let mut full_roster = self.history.clone();
-    for (id, entity) in &self.state.entities {
-      full_roster.insert(*id, entity.clone());
+    // 1. Save all active entities
+    for entity in self.state.entities.values() {
+        save_entity_to_datastore(&self.store, entity);
     }
-
-    let memfile = DataStore::new().root.parent().unwrap().join("runtime").join("hollis").join(&self.memory_file);
-    if let Ok(file) = OpenOptions::new()
-    .write(true)
-    .create(true)
-    .truncate(true)
-    .open(memfile) 
-    {
-      let writer = BufWriter::new(file);
-      let _ = serde_json::to_writer(writer, &full_roster);
+    
+    // 2. Save all historical entities
+    for entity in self.history.values() {
+        save_entity_to_datastore(&self.store, entity);
     }
   }
+}
+
+fn save_entity_to_datastore(store: &DataStore, entity: &Entity) {
+    let mut entity_data = DataObject::new();
+    entity_data.put_int("id", entity.id as i64);
+    entity_data.put_string("label", &entity.label);
+    entity_data.put_int("last_heard", entity.last_heard as i64);
+
+    // 1. Serialize Position
+    let mut pos_data = DataObject::new();
+    pos_data.put_float("x", entity.position.x as f64);
+    pos_data.put_float("y", entity.position.y as f64);
+    pos_data.put_float("z", entity.position.z as f64);
+    entity_data.put_object("position", pos_data); // Moves pos_data
+
+    // 2. Serialize Velocity
+    let mut vel_data = DataObject::new();
+    vel_data.put_float("dx", entity.velocity.dx as f64);
+    vel_data.put_float("dy", entity.velocity.dy as f64);
+    vel_data.put_float("dz", entity.velocity.dz as f64);
+    entity_data.put_object("velocity", vel_data); // Moves vel_data
+
+    // 3. Serialize Signature (FIXED: f32 to f64 cast)
+    let mut signature_array = DataArray::new();
+    for &val in &entity.signature {
+        signature_array.push_float(val as f64); 
+    }
+    entity_data.put_array("signature", signature_array); // Moves signature_array
+
+    // 4. Wrap in the required "data" envelope
+    let mut envelope = DataObject::new();
+    envelope.put_object("data", entity_data);
+
+    // 5. Write to disk
+    let id_str = entity.id.to_string();
+    store.set_data("hollis_entities", &id_str, envelope);
+}
+
+fn load_entity_from_datastore(store: &DataStore, id: u64) -> Option<Entity> {
+    let id_str = id.to_string();
+    
+    // Check if the file exists using the hashed path
+    if !store.exists("hollis_entities", &id_str) {
+        return None;
+    }
+
+    // Retrieve the DataObject
+    let envelope = store.get_data("hollis_entities", &id_str);
+    let entity_data = envelope.get_object("data");
+
+    // 1. Extract Signature (FIXED: f64 to f32 cast)
+    let sig_array = entity_data.get_array("signature");
+    let mut signature = Vec::new();
+    for val in sig_array.objects() {
+        signature.push(val.float() as f32); 
+    }
+
+    // 2. Extract Position (with a safe fallback to origin)
+    let position = if entity_data.has("position") {
+        let p = entity_data.get_object("position");
+        Point3D {
+            x: p.get_float("x") as f32,
+            y: p.get_float("y") as f32,
+            z: p.get_float("z") as f32,
+        }
+    } else {
+        Point3D::new(0.0, 0.0, 0.0)
+    };
+
+    // 3. Extract Velocity (with a safe fallback to zero)
+    let velocity = if entity_data.has("velocity") {
+        let v = entity_data.get_object("velocity");
+        Vector3D {
+            dx: v.get_float("dx") as f32,
+            dy: v.get_float("dy") as f32,
+            dz: v.get_float("dz") as f32,
+        }
+    } else {
+        Vector3D { dx: 0.0, dy: 0.0, dz: 0.0 }
+    };
+
+    // 4. Fully initialize the struct (FIXED: Missing fields)
+    Some(Entity {
+        id: entity_data.get_int("id") as u64,
+        label: entity_data.get_string("label"),
+        last_heard: entity_data.get_int("last_heard") as u64,
+        signature,
+        signature_count: 1, 
+        position, 
+        velocity, 
+    })
 }
 
 fn qwert(){

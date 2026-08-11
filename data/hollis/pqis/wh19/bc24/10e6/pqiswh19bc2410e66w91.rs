@@ -1,4 +1,4 @@
-let f = DataStore::new().root.join("RAW_LLM");
+let f = DataStore::new().root.parent().unwrap().join("RAW_LLM");
 std::fs::create_dir_all(&f);
 let mut x = count_files(f.clone());
 
@@ -26,6 +26,10 @@ let out = {
     "GEMINI" => {
       // Call the helper function for Gemini
       ask_gemini(prompt, system_prompt)
+    },
+    "VLLM" => {
+      // Call the helper function for vLLM
+      ask_vllm(prompt, system_prompt)
     },
     "OLLAMA" => {
       // Call the helper function for Ollama
@@ -190,6 +194,91 @@ pub fn ask_gemini(prompt:String, system_prompt: Option<String>) -> String {
   final_response_text
 }
 
+pub fn ask_vllm(prompt: String, system_prompt: Option<String>) -> String {
+    let meta = DataStore::globals().get_object("system").get_object("apps").get_object("hollis").get_object("runtime");
+
+    // Get VLLM configuration from scratch meta
+    // VLLM_URL should be the full endpoint, e.g., "http://localhost:8000/v1/chat/completions"
+    let url = meta.get_string("VLLM_URL");
+    let model = meta.get_string("VLLM_MODEL");
+
+    // --- 1. Build the OpenAI-compatible payload ---
+    let mut payload = DataObject::new();
+    payload.put_string("model", &model);
+
+    // Build the messages array
+    let mut messages = DataArray::new();
+    if let Some(sp_text) = system_prompt {
+        let mut system_message = DataObject::new();
+        system_message.put_string("role", "system");
+        system_message.put_string("content", &sp_text);
+        messages.push_object(system_message);
+    }
+    let mut user_message = DataObject::new();
+    user_message.put_string("role", "user");
+    user_message.put_string("content", &prompt);
+    messages.push_object(user_message);
+
+    payload.put_array("messages", messages);
+    let mut chat_kwargs = DataObject::new();
+    chat_kwargs.put_boolean("enable_thinking", false);
+    payload.put_object("chat_template_kwargs", chat_kwargs);
+
+    // Add generation parameters
+    payload.put_float("temperature", 0.4);
+    payload.put_int("max_tokens", 8192);
+
+    // --- Setup ureq Agent with Long Timeout ---
+    let agent = ureq::AgentBuilder::new()
+        .timeout_read(std::time::Duration::from_secs(600))
+        .timeout_write(std::time::Duration::from_secs(600))
+        .build();
+
+    //println!("VLLM PAYLOAD: {}", payload.to_string());
+
+    let mut final_response_text = "{\"Unsupported\":null}".to_string();
+
+    for retry_count in 0..5 {
+        let response = agent.post(&url)
+            .set("Content-Type", "application/json")
+            .send_json(payload.to_json());
+
+        match response {
+            Ok(resp) => {
+                match resp.into_string() {
+                    Ok(body) => {
+                      	//println!("VLLM RESPONSE: {}", &body);
+                        let root = DataObject::from_string(&body);
+                        if let Ok(choices) = root.try_get_array("choices") {
+                            if choices.len() > 0 {
+                                let choice = choices.get_object(0);
+                                if let Ok(message) = choice.try_get_object("message") {
+                                    if let Ok(content) = message.try_get_string("content") {
+                                        return content; // Success
+                                    }
+                                }
+                            }
+                        }
+                        final_response_text = format!("Error: Unexpected JSON structure from vLLM: {}", body);
+                    },
+                    Err(e) => final_response_text = format!("Error reading vLLM response body: {}", e),
+                }
+            },
+            Err(ureq::Error::Status(code, resp)) => {
+                let error_body = resp.into_string().unwrap_or_default();
+                final_response_text = format!("vLLM API Error {}: {}", code, error_body);
+            },
+            Err(ureq::Error::Transport(e)) => {
+                final_response_text = format!("Network Error to vLLM: {}", e);
+            }
+        }
+
+        println!("vLLM call failed (Attempt {}), retrying... Error: {}", retry_count + 1, final_response_text);
+        std::thread::sleep(std::time::Duration::from_secs(2_u64.pow(retry_count)));
+    }
+
+    final_response_text
+}
 
 pub fn ask_ollama(prompt: String, system_prompt: Option<String>) -> String {
   let meta = DataStore::globals().get_object("system").get_object("apps").get_object("hollis").get_object("runtime");
@@ -201,6 +290,7 @@ pub fn ask_ollama(prompt: String, system_prompt: Option<String>) -> String {
   // --- 1. Build the payload for Ollama ---
   let mut payload = DataObject::new();
   payload.put_string("model", model);
+  payload.put_boolean("think", false);
   payload.put_string("prompt", &prompt);
   payload.put_bool("stream", false); // Request a single, complete response
   payload.put_int("keep_alive", 0);

@@ -1,252 +1,158 @@
 DataObject::new()
 }
 
-const FFT_SIZE: usize = 2048;
-const WINDOW_CORRECTION: f32 = 2.0;
+pub fn setup_hardware_routing() {
+    println!("--- Initializing Headless Hardware Routing ---");
+    
+    let check = std::process::Command::new("pw-link").arg("-o").output().unwrap();
+    let output = String::from_utf8_lossy(&check.stdout);
+    
+    if !output.contains("hollis_aggregate") {
+        println!("Building 7-channel 3D Array...");
+        let _ = std::process::Command::new("pactl")
+            .args([
+                "load-module", 
+                "module-null-sink", 
+                "media.class=Audio/Sink", 
+                "sink_name=hollis_aggregate", 
+                "channel_map=front-left,front-right,front-center,lfe,rear-left,rear-right,side-left"
+            ])
+            .status();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
+    
+    println!("Patching physical hardware to the array...");
+    let links = vec![
+        ("alsa_output.usb-Generic_USB_Audio-00.HiFi_7_1__Speaker__sink:monitor_FL", "hollis_aggregate:playback_FL"),
+        ("alsa_output.usb-Generic_USB_Audio-00.HiFi_7_1__Speaker__sink:monitor_FR", "hollis_aggregate:playback_FR"),
+        ("alsa_input.usb-Generic_Blue_Microphones_LT_210915032721AD02002E_111000-00.analog-stereo:capture_FL", "hollis_aggregate:playback_FC"),
+        ("alsa_input.usb-Generic_Blue_Microphones_LT_210915032721AD02002E_111000-00.analog-stereo:capture_FR", "hollis_aggregate:playback_LFE"),
+        ("alsa_input.usb-Andrea_Electronics_Andrea_PureAudio-00.analog-stereo:capture_FL", "hollis_aggregate:playback_RL"),
+        ("alsa_input.usb-Andrea_Electronics_Andrea_PureAudio-00.analog-stereo:capture_FR", "hollis_aggregate:playback_RR"),
+        ("alsa_input.usb-HD_Camera_Manufacturer_HD_USB_Camera_SN0047-03.mono-fallback:capture_MONO", "hollis_aggregate:playback_SL"), 
+    ];
 
-pub struct AudioSensor {
-  _stream: cpal::Stream,
-  pub sample_rate: u32,
-}
-
-impl AudioSensor {
-  pub fn new(
-    sensor_id: String,
-    device_name_query: String, // [NEW] e.g., "Webcam" or "default"
-    channel_selector: Option<usize>, // [NEW] None = Mix, Some(0) = Left, Some(1) = Right
-    tx: Sender<AcousticFrame>,
-  ) -> Result<Self, Box<dyn std::error::Error>> {
-
-    let host = cpal::default_host();
-    let devices = host.input_devices()?;
-
-    // 1. Find the requested device
-    let device = if device_name_query == "default" {
-      host.default_input_device().ok_or("No default device")?
-    } else {
-      let mut found = None;
-      for d in devices {
-        if let Ok(name) = d.name() {
-          if name.contains(&device_name_query) {
-            found = Some(d);
-            break;
-          }
+    println!("Patching physical hardware to the array...");
+    for (src, dest) in links {
+        let out = std::process::Command::new("pw-link").arg(src).arg(dest).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        
+        // If there's an error, and it's NOT just telling us it's already plugged in, scream about it!
+        if !err.is_empty() && !err.contains("File exists") {
+            println!("  [FAIL] {} -> {}: {}", src, dest, err.trim());
+        } else if err.is_empty() {
+            println!("  [ OK ] {} -> {}", src, dest);
         }
-      }
-      if let Some(d) = found {
-        d
-      } else {
-        // [DEBUG] List devices if not found
-        println!("Could not find device containing '{}'. Available devices:", device_name_query);
-        for d in host.input_devices()? {
-          println!(" - {}", d.name().unwrap_or("Unknown".to_string()));
-        }
-        return Err("Device not found".into());
-      }
-    };
-
-    println!("Initializing Sensor '{}' on device: {}", sensor_id, device.name()?);
-
-    let config = device.default_input_config()?;
-    let sample_rate = config.sample_rate().0;
-    let channels = config.channels();
-
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(FFT_SIZE);
-    let buffer = Arc::new(Mutex::new(Vec::with_capacity(FFT_SIZE * channels as usize)));
-
-    let tx = tx.clone();
-    let sensor_id = sensor_id.clone();
-    let bin_width = sample_rate as f32 / FFT_SIZE as f32;
-
-    let err_fn = |err| eprintln!("Audio stream error: {}", err);
-
-    let stream = match config.sample_format() {
-      cpal::SampleFormat::F32 => device.build_input_stream(
-        &config.into(),
-        move |data: &[f32], _: &_| {
-          process_audio_chunk(
-            data, 
-            &buffer, 
-            FFT_SIZE, 
-            &fft, 
-            &tx, 
-            &sensor_id,
-            bin_width,
-            channels,
-            channel_selector 
-          );
-        },
-        err_fn,
-        None,
-      )?,
-      _ => return Err("Unsupported sample format".into()),
-    };
-
-    stream.play()?;
-
-    Ok(AudioSensor { 
-      _stream: stream,
-      sample_rate 
-    })
-  }
+    }
 }
 
-fn process_audio_chunk(
-  input: &[f32],
-  buffer_mutex: &Arc<Mutex<Vec<f32>>>,
-  fft_size: usize,
-  fft: &Arc<dyn rustfft::Fft<f32>>,
-  tx: &Sender<AcousticFrame>,
-  sensor_id: &str,
-  bin_width: f32,
-  channels: u16,
-  channel_selector: Option<usize>,
-) {
-  let mut buffer = match buffer_mutex.lock() {
-    Ok(guard) => guard,
-    Err(_) => return,
-  };
-
-  // 1. Channel Selection Logic
-  // If we have a selector (e.g., 0 for Left), grab that. Otherwise, Downmix.
-  if let Some(target_ch) = channel_selector {
-      if (channels as usize) > target_ch {
-          let selected_chunk: Vec<f32> = input.chunks(channels as usize)
-              .map(|chunk| chunk[target_ch]) // Pick the specific channel
-              .collect();
-          buffer.extend(selected_chunk);
-      } else {
-          // Fallback: If requested channel doesn't exist, just use Ch 0
-          let fallback: Vec<f32> = input.chunks(channels as usize)
-              .map(|chunk| chunk[0])
-              .collect();
-          buffer.extend(fallback);
-      }
-  } else {
-    // 1. Stereo to Mono Downmix
-    // If we receive stereo [L, R, L, R], we average them to [M, M].
-    if channels > 1 {
-      // This is a simple iterator approach to averaging channels
-      let mono_chunk: Vec<f32> = input.chunks(channels as usize)
-      .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
-      .collect();
-      buffer.extend(mono_chunk);
-    } else {
-      buffer.extend_from_slice(input);
-    }
-  }
-  
-  if buffer.len() >= fft_size {
-    let mut raw_samples: Vec<f32> = buffer.drain(0..fft_size).collect();
-
-    // 2. DC Offset Removal (Centering the wave)
-    let mean: f32 = raw_samples.iter().sum::<f32>() / fft_size as f32;
-    for sample in &mut raw_samples {
-      *sample -= mean;
-    }
-
-    // Zero-Crossing Rate (Time Domain)
-    // Count how many times the signal sign changes (positive <-> negative)
-    let mut zero_crossings = 0;
-    for i in 1..raw_samples.len() {
-      if (raw_samples[i-1] > 0.0 && raw_samples[i] <= 0.0) || 
-      (raw_samples[i-1] <= 0.0 && raw_samples[i] > 0.0) {
-        zero_crossings += 1;
-      }
-    }
-    // Normalize: ZCR of 1.0 means it crossed every single sample (Nyquist noise)
-    let zcr = zero_crossings as f32 / raw_samples.len() as f32;      
-
-
-
-    // 3. RMS Calculation (Time Domain)
-    let sum_squares: f32 = raw_samples.iter().map(|&x| x * x).sum();
-    let rms = (sum_squares / fft_size as f32).sqrt();
-
-    // 4. Windowing
-    let mut plan_buffer: Vec<Complex<f32>> = raw_samples
-    .iter()
-    .enumerate()
-    .map(|(i, &sample)| {
-      let window = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (fft_size as f32 - 1.0)).cos());
-      Complex::new(sample * window, 0.0)
-    })
-    .collect();
-
-    // 5. FFT
-    fft.process(&mut plan_buffer);
-
-    // 6. Spectrum Analysis
-    let spectrum_len = fft_size / 2;
-    let spectrum: Vec<f32> = plan_buffer[0..spectrum_len]
-    .iter()
-    .map(|c| (c.norm() / fft_size as f32) * WINDOW_CORRECTION) 
-    .collect();
-
-
-
-
-    // Spectral Centroid (Frequency Domain)
-    // Formula: Sum(Freq * Magnitude) / Sum(Magnitude)
-    let mut weighted_sum = 0.0;
-    let mut total_magnitude = 0.0;
-
-    // Calculate a dynamic threshold for "significant energy"
-    // We use the RMS we just calculated to ignore quiet bands.
-    // If a specific frequency bin is much quieter than the overall loudness, ignore it.
-    let mag_threshold = rms * 0.1; 
-
-    for (i, &magnitude) in spectrum.iter().enumerate() {
-      // Only count this frequency if it's actually audible above the mix
-      if magnitude > mag_threshold {
-        let freq = i as f32 * bin_width;
-        weighted_sum += freq * magnitude;
-        total_magnitude += magnitude;
-      }
-    }
-
-    let spectral_centroid = if total_magnitude > 0.0 {
-      weighted_sum / total_magnitude
-    } else {
-      0.0
-    };    
-
-
-    // 7. Find Dominant Frequency (Ignoring DC/Index 0)
-    let mut max_val = 0.0;
-    let mut max_idx = 0;
-
-    // Skip index 0 (0Hz) and start looking from index 1 (approx 21Hz)
-    for (i, &val) in spectrum.iter().enumerate().skip(1) {
-      if val > max_val {
-        max_val = val;
-        max_idx = i;
-      }
-    }
-
-    let dominant_freq = max_idx as f32 * bin_width;
-
-    // 8. Timestamp & Send
-    let start = SystemTime::now();
-    let timestamp = start.duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_micros() as u64;
-
-    let frame = AcousticFrame {
-      sensor_id: sensor_id.to_string(),
-      timestamp_micros: timestamp,
-      rms_power: rms,
-      dominant_freq_hz: Some(dominant_freq),
-      spectrum,
-      zcr,               // <--- Added
-      spectral_centroid, // <--- Added
-      direction_of_arrival: None,
-      raw_samples: raw_samples.clone(),
-    };
-
-    let _ = tx.try_send(frame);
-  }
+pub struct MasterSensorArray {
+    _process: std::process::Child,
+    pub sample_rate: u32,
+    pub total_channels: u16,
 }
 
-fn qwert() {
+impl MasterSensorArray {
+    pub fn new(
+        _device_name_query: &str, // No longer needed, we hardcode the dish
+        loopback_count: usize, 
+        mic_count: usize,      
+        tx: crossbeam_channel::Sender<SynchronizedArrayFrame>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+
+        let required_channels = (loopback_count + mic_count) as u16;
+        let sample_rate = 44100;
+
+        println!("Bypassing ALSA completely. Piping raw data directly from Radar Dish...");
+
+        // 1. The Raw Audio Pipeline
+        let (raw_tx, raw_rx) = crossbeam_channel::bounded::<Vec<f32>>(1000);
+
+        // 2. The DSP Worker Thread
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let chunk_size = 2048 * required_channels as usize; 
+
+            while let Ok(raw_data) = raw_rx.recv() {
+                buffer.extend(raw_data);
+
+                while buffer.len() >= chunk_size {
+                    let chunk: Vec<f32> = buffer.drain(0..chunk_size).collect();
+                    
+                    let mut loopback_mix = vec![0.0; 2048];
+                    let mut isolated_mics = vec![vec![0.0; 2048]; mic_count];
+
+                    for frame_idx in 0..2048 {
+                        let offset = frame_idx * required_channels as usize;
+                        
+                        if loopback_count >= 2 {
+                            loopback_mix[frame_idx] = (chunk[offset] + chunk[offset + 1]) / 2.0;
+                        } else if loopback_count == 1 {
+                            loopback_mix[frame_idx] = chunk[offset];
+                        }
+
+                        for mic_idx in 0..mic_count {
+                            isolated_mics[mic_idx][frame_idx] = chunk[offset + loopback_count + mic_idx];
+                        }
+                    }
+
+                    let _ = tx.try_send(SynchronizedArrayFrame {
+                        timestamp_micros: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as u64,
+                        loopback_reference: loopback_mix,
+                        mic_channels: isolated_mics,
+                    });
+                }
+            }
+        });
+
+        // 3. The OS-Level Audio Pipe
+        let mut child = std::process::Command::new("parec")
+            .args([
+                "--device=hollis_aggregate.monitor", 
+                "--format=float32le", 
+                &format!("--channels={}", required_channels), 
+                "--channel-map=front-left,front-right,front-center,lfe,rear-left,rear-right,side-left", // <--- FORCE MAP
+                &format!("--rate={}", sample_rate)
+            ])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("CRITICAL: Failed to spawn parec.");
+            
+        let mut stdout = child.stdout.take().unwrap();
+        
+        std::thread::spawn(move || {
+            use std::io::Read;
+            // 6 channels * 4 bytes per float * 1024 frames = 24,576 bytes per read
+            let chunk_bytes = required_channels as usize * 4 * 1024;
+            let mut buf = vec![0u8; chunk_bytes]; 
+            
+            loop {
+                // read_exact ensures we never misalign our float conversion!
+                match stdout.read_exact(&mut buf) {
+                    Ok(_) => {
+                        let floats: Vec<f32> = buf.chunks_exact(4)
+                            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+                            .collect();
+                        
+                        let _ = raw_tx.try_send(floats);
+                    }
+                    Err(_) => {
+                        eprintln!("Audio pipe disconnected.");
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(MasterSensorArray { _process: child, sample_rate, total_channels: required_channels })
+    }
+}
+
+impl Drop for MasterSensorArray {
+    fn drop(&mut self) {
+        println!("Shutting down hardware audio pipe (parec)...");
+        // Forcefully kill the background Linux process
+        let _ = self._process.kill();
+        // Wait for it to close to prevent a "zombie" process in htop
+        let _ = self._process.wait(); 
+    }
