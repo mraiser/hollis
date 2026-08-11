@@ -17,10 +17,14 @@ cd ../
 CHUCKTHIS/target/release/newbound rebuild
 rm -rf CHUCKTHIS
 cd hollis
-cargo build --release
+cargo build --release --features="serde_support"
 cd ../
 mkdir -p models
 cd models
-wget https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.en.bin
+# Moonshine base (ONNX) - speech-to-text. This is the layout transcribe-rs
+# expects (encoder/decoder .onnx + tokenizer.json in models/moonshine-base).
+curl -L https://blob.handy.computer/moonshine-base.tar.gz | tar xz
+# Smart Turn v3.2 (CPU) - the voice-activity/turn-completion gate.
+curl -LO https://raw.githubusercontent.com/pipecat-ai/pipecat/main/src/pipecat/audio/turn/smart_turn/data/smart-turn-v3.2-cpu.onnx
 cd ../
 cargo run --release --features="serde_support"

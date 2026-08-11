@@ -9,7 +9,7 @@ Unlike standard voice assistants that simply wait for a wake word, Hollis mainta
 * **Binaural Perception:** Fuses audio from two microphones to estimate direction of arrival (DOA) and separate sound sources.
 * **Acoustic Entity Tracking:** Identifies and tracks unique sound sources ("Entities") using spectral fingerprinting and spatial logic.
 * **Context Awareness:** Generates high-level briefings on the environment (e.g., "The room is library-quiet" vs "Active conversation").
-* **Local Transcription:** Uses **OpenAI Whisper** (via `whisper-rs`) for privacy-focused, offline speech-to-text.
+* **Local Transcription:** Uses **Moonshine** (ONNX, via `transcribe-rs`) for privacy-focused, offline speech-to-text, gated by the **Smart Turn v3** voice-activity model.
 * **Cognitive Loop:** Implements a "Pulse" architecture (Ingest → Synthesize → Emit) to process sensory data into upstream insights.
 
 ## 🛠️ Installation
@@ -36,22 +36,26 @@ This repository includes a bootstrap script to set up the Newbound environment a
 
 ## 🧠 Model Setup (If not using the install script)
 
-Hollis runs the speech recognition model locally. **You must either install with the install.sh script or download the model file manually** before the transcription features will work.
+Hollis runs its speech models locally. **You must either install with the install.sh script or download the two model files manually** before the transcription features will work.
 
-1.  **Download the Model:**
-    Get the `ggml-medium.en.bin` model (compatible with `whisper.cpp`).
-    * *Recommended Source:* [Hugging Face - ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/tree/main)
+1.  **Moonshine (speech-to-text):**
+    Download and unpack the Moonshine *base* ONNX bundle into `models/moonshine-base/`
+    (the directory must contain the encoder/decoder `.onnx` files plus `tokenizer.json`,
+    which is the layout `transcribe-rs` expects).
+    * *Recommended Source (from the transcribe-rs docs):* https://blob.handy.computer/moonshine-base.tar.gz
 
-2.  **Place the File:**
-    By default, Hollis looks for the model at `models/ggml-medium.en.bin` relative to the runtime directory.
+2.  **Smart Turn v3.2 (voice-activity / turn completion):**
+    Download `smart-turn-v3.2-cpu.onnx` to `models/smart-turn-v3.2-cpu.onnx`
+    (this path is currently fixed, relative to the directory Hollis runs from).
+    * *Source:* [pipecat-ai](https://huggingface.co/pipecat-ai/smart-turn-v3) (also bundled in the pipecat repo at `src/pipecat/audio/turn/smart_turn/data/`)
 
-3.  **Configure the Path:**
-    If you place the model elsewhere, or wish to use a different size (e.g., `base.en`, `large-v3`), edit the configuration file located at:
+3.  **Configure the Moonshine Path:**
+    If you place the Moonshine model elsewhere, edit the configuration file located at:
     `runtime/hollis/botd.properties`
 
     Add or update the following line:
     ```properties
-    model=/absolute/path/to/your/ggml-model.bin
+    model=/absolute/path/to/your/moonshine-model-dir
     ```
 
 ## ⚙️ Configuration
@@ -60,7 +64,7 @@ Configuration is handled in `runtime/hollis/botd.properties`. The system will ge
 
 | Property | Description | Default |
 | :--- | :--- | :--- |
-| `model` | Path to the GGML Whisper model binary. | `models/ggml-medium.en.bin` |
+| `model` | Path to the Moonshine ONNX model directory. | `models/moonshine-base` |
 | `mic1` | Name (partial match) of the primary/left microphone. | `default` |
 | `mic2` | Name (partial match) of the secondary/right microphone. | *(None)* |
 | `mic_distance` | Distance between microphones in meters (for spatial math). | `0.6` |
@@ -72,7 +76,7 @@ Hollis supports multiple LLM backends for its cognitive functions. You can confi
 
 | Property | Description | Default |
 | --- | --- | --- |
-| `LLM` | The LLM backend provider. Options: `GEMINI`, `OLLAMA`, or `CUSTOM`. | `GEMINI` |
+| `LLM` | The LLM backend provider. Options: `GEMINI`, `OLLAMA`, `VLLM`, or `CUSTOM`. | `GEMINI` |
 
 #### Provider Specific Settings
 
