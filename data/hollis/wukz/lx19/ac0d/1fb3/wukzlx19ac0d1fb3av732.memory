@@ -1,0 +1,16 @@
+[
+  {
+    "claim": "mraiser/hollis as published does not compile: its code imports transcribe_rs (Moonshine ONNX), ort and ureq, none declared in the crate manifest or store meta; the working closure in the CCR sandbox was transcribe-rs {0.3, features=[onnx]}, ort =2.0.0-rc.12 (pinned by transcribe-rs 0.3.11), ureq 2.x, whisper-rs without cuda, plus apt libasound2-dev and ort-sys linked against pip onnxruntime 1.28.0 (ORT_STRATEGY=system ORT_PREFER_DYNAMIC_LINK=1 ORT_LIB_LOCATION with a libonnxruntime.so.1 soname symlink; the pyke CDN binary download is blocked by the egress proxy).",
+    "detail": "Deposited after the hollis end-to-end install exercise, 2026-08-11. All seven hollis commands ship with blank desc, so they are invisible to newbound mcp tools/list (blank-desc omission).",
+    "tags": "hollis,dependencies,onnxruntime,ccr",
+    "confidence": "high",
+    "time": 1786479035776
+  },
+  {
+    "claim": "mraiser/hollis is fixed on branch claude/hollis-repo-evaluation-85817i (commit 30dfe50): dependency closure declared (transcribe-rs onnx / ort =2.0.0-rc.12 / ureq 2, whisper-rs and its cuda pin removed along with init's dead import), serde optional behind agent-pattern serde_support wiring, flowlang/ndata at 0.3.31/0.3.17, [workspace] opt-out in the crate manifest, install.sh/README fetch the real models (Moonshine base tarball from blob.handy.computer per transcribe-rs docs; smart-turn-v3.2-cpu.onnx from the pipecat repo - the raw.githubusercontent URL verified working), and desc filled on init/ask_llm/cortex so hollis appears in tools/list (module-carrier stubs stay blank by design).",
+    "detail": "dev.github.import accepts a local path as url (git clone from a directory clones its checked-out HEAD branch) - the disposable-instance verification imported the fixed branch that way before it was merged anywhere.",
+    "tags": "hollis,fixed,models,discoverability",
+    "confidence": "high",
+    "time": 1786482273806
+  }
+]
