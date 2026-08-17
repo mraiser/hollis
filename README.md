@@ -16,7 +16,7 @@ Unlike standard voice assistants that simply wait for a wake word, Hollis mainta
 
 ### 1. Prerequisites
 * **Rust:** Ensure you have the latest stable Rust and Cargo installed (`rustup update`).
-* **System Dependencies:** You may need `alsa-lib` or `libasound2-dev` (Linux) for the `cpal` audio backend.
+* **System Dependencies:** You may need `alsa-lib` or `libasound2-dev` (Linux) for the `cpal` audio backend. The sensor array additionally needs the PipeWire/Pulse **client tools at runtime**: `pw-link` (port patching), `pactl` (creates the `hollis_aggregate` sink), and `parec` (the capture pipe) — on Debian/Ubuntu that is `pipewire-bin` + `pulseaudio-utils`; on NixOS add `pipewire` and `pulseaudio` to the shell env (the shipped `default.nix` includes them) with `services.pipewire.pulse.enable = true` in your system config. `pactl info` should answer with "PulseAudio (on PipeWire ...)" before starting the cortex.
 * **Microphones:** Hollis works best with a stereo pair of microphones to enable spatial tracking, though it can function with a single input.
 
 ### 2. Quick Start
