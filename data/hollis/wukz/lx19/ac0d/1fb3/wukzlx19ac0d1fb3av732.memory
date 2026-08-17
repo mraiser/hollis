@@ -12,5 +12,26 @@
     "tags": "hollis,fixed,models,discoverability",
     "confidence": "high",
     "time": 1786482273806
+  },
+  {
+    "claim": "Phase 9 (2026-08-17): hollis is the agent's first plugin sensor. The cortex Transcript arm fire-and-forgets emit_acoustic_perception (home: the hollis.audio.inject command file) which wraps the utterance in a perception-contract v1 envelope (kind acoustic_event, sensor hollis, payload {event:transcript, text, entity}), binds claims via agent-archivist-recall on the resolved entity label (skipped for generic labels: Entity #N/Unknown/Speaker/Sustained), and delivers through Command::lookup(agent, executive, perceive). A failed lookup (agent not installed) is a counted skip - hollis runs standalone by design. Gate: emit=off in system.apps.hollis.runtime (absent = on). Counters ride the HOLLIS_SENSOR global; hollis.audio.status reports them plus listening/emit/agent_present/config; hollis.audio.transcripts pages the utterance store.",
+    "detail": "Verified on a disposable: 3 marker injects steered fast/normal/deep, per-sensor rows in executive status and both UIs, gate off/on cycled, named-entity inject arrived bound:1 with the seeded claim as bound_top; agent-less instance counted the skip gracefully. The dependency arrow is one-way (owner's rule): hollis knows agent, agent never references hollis.",
+    "tags": "hollis,sensor,perception-contract,phase9",
+    "confidence": "high",
+    "time": 1786980000723
+  },
+  {
+    "claim": "In-process results from Command::lookup(...).execute(p) arrive as the generated wrapper's envelope: the declared return value rides under key 'a'. Unwrap (if r.has(\"a\") { r.get_object(\"a\") }) before reading fields - hollis's emit path needs it for both the recall binding and the perceive queue_depth; missing the unwrap silently reads nothing (bound:0, no error).",
+    "detail": "Cost one battery round in Phase 9: recall's claims were invisible until the binding block unwrapped 'a'. The HTTP /app/exec path does NOT need this - format_result already unwraps into .data.",
+    "tags": "hollis,flowlang,command-envelope",
+    "confidence": "high",
+    "time": 1786980000812
+  },
+  {
+    "claim": "Building libhollis.so where cdn.pyke.io is blocked (the CCR sandbox egress proxy 403s the ort-sys prebuilt download): download the official Microsoft onnxruntime-linux-x64-1.24.2.tgz from GitHub releases, then build with ORT_LIB_LOCATION=<extracted>/lib (must point at the lib/ subdir) plus ORT_PREFER_DYNAMIC_LINK=1, and --features=serde_support as always. The resulting dylib then NEEDs libonnxruntime.so.1 at load time, so every process that loads it (server, mcp, nb-call) needs LD_LIBRARY_PATH=<extracted>/lib. On boxes that can reach the pyke CDN the default static download keeps the dylib self-contained - the env vars are sandbox-only, never committed anywhere.",
+    "detail": "Supersedes the older pip-onnxruntime-1.28.0 closure note (ORT_STRATEGY=system with a soname symlink); the MS release tarball ships the .so.1 soname directly and matches ort-sys 2.0.0-rc.12's expected ms@1.24.2.",
+    "tags": "hollis,onnxruntime,ort-sys,ccr,build",
+    "confidence": "high",
+    "time": 1786980000907
   }
 ]

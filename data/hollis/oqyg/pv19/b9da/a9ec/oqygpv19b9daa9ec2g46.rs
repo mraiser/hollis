@@ -214,6 +214,23 @@ impl Cortex {
         self.store.set_data("hollis_transcripts", &now.to_string(), envelope);
 
         self.analyze_transcript(entity_id, text.clone());
+
+        // Phase 9 (docs/perception-contract.md section 5): propose the
+        // utterance to the agent executive - fire-and-forget on a thread
+        // so the audio loop never blocks on the plugin host; a missing
+        // agent library is a counted skip inside the emit path.
+        {
+          let etext = text_content.clone();
+          let elabel = self.state.entities.get(&entity_id)
+            .map(|e| e.label.clone())
+            .unwrap_or_else(|| format!("Entity #{}", entity_id));
+          let elabel = if elabel == "Sustained" || elabel == "Speaker" || elabel == "Unknown" {
+            format!("Entity #{}", entity_id)
+          } else { elabel };
+          thread::spawn(move || {
+            let _ = crate::hollis::audio::inject::emit_acoustic_perception("transcript", &etext, &elabel, 0.7);
+          });
+        }
       },
       EventKind::ContextUpdate(briefing) => {
         // [NEW] The Situation Room Update
