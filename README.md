@@ -115,6 +115,37 @@ Hollis is composed of three primary cognitive layers:
     * **Discourse Analysis:** Aggregates transcripts to summarize the topic of conversation.
     * **Situation Room:** Maintains a high-level key-value store of the current reality (Occupancy, Atmosphere, Discourse).
 
+## 👂 The Agent Sensor (plugin posture)
+
+Hollis is a **plugin sensor for the Newbound agent**: hollis knows what
+`agent` is, `agent` never references hollis. When the agent library is
+installed alongside it, every transcript the Cortex resolves is also
+proposed to the agent's executive as a **perception-contract v1
+envelope** (`kind: acoustic_event`, `sensor: hollis`, payload
+`{event: transcript, text, entity}`), with claim **binding** done
+through the agent's own recall — the claims that name the resolved
+speaker ride along. Without the agent library, hollis runs exactly as
+before: the emit path counts a skip and moves on. See the agent repo's
+`docs/perception-contract.md` for the envelope.
+
+Commands on `hollis.audio`:
+
+| Command | What it does |
+| :--- | :--- |
+| `inject` (`text`, `entity`) | Build and deliver the same envelope a live utterance gets — the test surface for boxes with no microphone. |
+| `status` | Sensor status: `listening` (cortex loop), `emit` gate, counters (`emitted`/`skips`/`errors`), config subset, `agent_present`. |
+| `transcripts` (`limit`) | Newest utterance records from the `hollis_transcripts` store. |
+
+The **Hollis app** (`/hollis/index.html`, apps=`hollis`) is the UI over
+all of this: listening/emit/agent chips, cortex toggle, the inject
+form, sensor counters, and recent transcripts.
+
+One extra `botd.properties` key governs the sensor:
+
+| Property | Description | Default |
+| :--- | :--- | :--- |
+| `emit` | `off` silences the sensor (perceptions stop; the ears keep running). | `on` |
+
 ## 📄 License
 
 MIT License

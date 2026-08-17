@@ -1,0 +1,46 @@
+<section class="ho-app">
+  <header class="ho-head">
+    <span class="ho-title">hollis</span>
+    <span class="ho-sub">acoustic sensor &mdash; ears for the agent</span>
+    <span class="ho-chiprow">
+      <span class="ho-chip" data-chip="listening">&hellip;</span>
+      <span class="ho-chip" data-chip="emit">&hellip;</span>
+      <span class="ho-chip" data-chip="agent">&hellip;</span>
+    </span>
+  </header>
+  <div class="ho-grid">
+    <div class="ho-card" data-card="pipeline">
+      <p class="ho-card-t">the pipeline &mdash; mics &rarr; perception &rarr; cortex</p>
+      <div class="ho-kv" data-kv="pipeline"></div>
+      <span class="ho-btnrow">
+        <button class="ho-btn" data-act="cortex-toggle"
+          title="toggle the whole acoustic pipeline: sensor array, DOA perception, transcriber, cortex">cortex&hellip;</button>
+      </span>
+      <pre class="ho-note" data-note="pipeline"></pre>
+    </div>
+    <div class="ho-card" data-card="sensor">
+      <p class="ho-card-t">the sensor &mdash; perceptions &rarr; agent.executive.perceive</p>
+      <div class="ho-kv" data-kv="sensor"></div>
+      <p class="ho-lbl">emit=off in system.apps.hollis.runtime silences the sensor without
+        stopping the ears; a missing agent library is a counted skip. counters are
+        live-instance state, not history.</p>
+      <pre class="ho-note" data-note="sensor"></pre>
+    </div>
+    <div class="ho-card" data-card="inject">
+      <p class="ho-card-t">inject &mdash; a transcript with no microphone</p>
+      <p class="ho-lbl">builds the same acoustic_event envelope a live utterance gets
+        (v1, sensor:hollis, claims bound via the agent's recall) and delivers it
+        through the perception contract. the test surface for quiet rooms.</p>
+      <span class="ho-formrow"><input class="ho-in" data-in="text" placeholder="what was said"></span>
+      <span class="ho-formrow">
+        <input class="ho-in ho-in-entity" data-in="entity" placeholder="who said it (entity)">
+        <button class="ho-btn" data-act="inject">inject</button>
+      </span>
+      <pre class="ho-note" data-note="inject"></pre>
+    </div>
+    <div class="ho-card" data-card="transcripts">
+      <p class="ho-card-t">recent transcripts</p>
+      <div class="ho-list" data-list="transcripts"></div>
+    </div>
+  </div>
+</section>
