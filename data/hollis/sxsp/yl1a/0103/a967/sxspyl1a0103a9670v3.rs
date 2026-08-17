@@ -35,7 +35,7 @@ if g.has("system") {
     let happ = sys.get_object("apps").get_object("hollis");
     if happ.has("runtime") {
       let meta = happ.get_object("runtime");
-      for k in ["mic1", "mic2", "loopback", "model", "memory_file", "mic_distance", "emit"] {
+      for k in ["mic1", "mic2", "loopback", "model", "memory_file", "mic_distance", "emit", "links", "ignore"] {
         if meta.has(k) { conf.put_string(k, &meta.get_string(k)); }
       }
     }

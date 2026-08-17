@@ -33,5 +33,12 @@
     "tags": "hollis,onnxruntime,ort-sys,ccr,build",
     "confidence": "high",
     "time": 1786980000907
+  },
+  {
+    "claim": "Tier 1 ear discovery (2026-08-17): setup_hardware_routing DERIVES the link map instead of hardcoding device names - the default sink monitor (pactl get-default-sink) becomes the AEC reference (that is where the calibration chirp plays), and every alsa_input capture port becomes a mic in stable lexically-sorted order filling FC/LFE/RL/RR/SL. Overrides in runtime/hollis/botd.properties: links=src>dst;... (explicit map; dst accepts bare channel names) and ignore=substr,... resolve_links is a pure function testable without hardware. parec spawn failure is now a proper Err naming the missing package (it was an .expect panic contradicting new()s own Result signature). Lesson that forced this: the hardcoded map carried one boxs USB serial numbers and UCM profile names; the first OS change (NixOS) renamed the 7.1 profile to plain Speaker and the links all failed - and the missing-mic case (device in lsusb but no PipeWire node) is invisible to any link map.",
+    "detail": "Verified by compiling the shipped source and running resolve_links standalone against the owners real pw-link -o output: speaker monitor -> FL/FR, Line/Mic pairs -> FC/LFE/RL/RR, camera mono -> SL; ignore filter, explicit links, and no-default-sink edges asserted.",
+    "tags": "hollis,sensor,discovery,tier1",
+    "confidence": "high",
+    "time": 1787010892274
   }
 ]
