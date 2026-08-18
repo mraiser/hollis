@@ -19,6 +19,13 @@ let
     alsa-lib
     alsa-utils
     ffmpeg-full
+    # The sensor's runtime tools: setup_hardware_routing spawns pw-link
+    # (port patching) and pactl (the hollis_aggregate null sink), and the
+    # capture pipe is a parec child process. pactl and parec are CLIENT
+    # tools here - the daemon never runs; PipeWire's pulse shim serves
+    # them (services.pipewire.pulse.enable = true in configuration.nix).
+    pipewire
+    pulseaudio
 
     # -- Python/AI --
     python312
