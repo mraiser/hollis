@@ -72,33 +72,15 @@ Configuration is handled in `runtime/hollis/botd.properties`. The system will ge
 | `links` | Explicit array map, `src>dst;src>dst;...` in `pw-link` port names (dst may be a bare channel `FL FR FC LFE RL RR SL` or a full port name). **Empty = auto-discovery**: the default sink's monitor becomes the echo-cancellation reference and every `alsa_input` capture port becomes a mic in stable sorted order. Pin this only when localization geometry matters — transcripts and voiceprints work in any order. | *(discover)* |
 | `ignore` | Comma-separated substrings; capture ports matching any are skipped during discovery. | *(none)* |
 
-### 🧠 LLM Configuration
+### 🧠 Cognition lives in the agent
 
-Hollis supports multiple LLM backends for its cognitive functions. You can configure the provider using the `LLM` property in `botd.properties`.
-
-| Property | Description | Default |
-| --- | --- | --- |
-| `LLM` | The LLM backend provider. Options: `GEMINI`, `OLLAMA`, `VLLM`, or `CUSTOM`. | `GEMINI` |
-
-#### Provider Specific Settings
-
-**1. Google Gemini (Default)**
-Required if `LLM=GEMINI`.
-
-* `GEMINI_API_KEY`: Your Google AI Studio API key.
-* *(Note: Currently uses `gemini-2.5-flash`)*
-
-**2. Ollama (Local)**
-Required if `LLM=OLLAMA`.
-
-* `OLLAMA_URL`: The full API endpoint (e.g., `http://localhost:11434/api/generate`).
-* `OLLAMA_MODEL`: The model tag to use (e.g., `llama3`, `mistral`).
-
-**3. Custom / External**
-Used if `LLM` is set to anything else.
-
-* `LLM_CTL`: Route to a custom Flowlang command in the format `lib:ctl:cmd`.
-* *Example:* `my_lib:my_controller:my_llm_wrapper`
+Hollis carries **no LLM of its own** (the donor-era `ask_llm` and its
+`GEMINI`/`OLLAMA` settings are gone). Hollis is a **sensor**: it
+stores transcripts, tracks entities, and proposes perceptions;
+*understanding* them - discourse, salience, memory - is the agent
+executive's job, reached through the emit path described in "The
+Agent Sensor" below. Point the agent's own `LLM=` arm wherever you
+like; hollis never makes a model call.
 
 ## 🏗️ Architecture
 
@@ -112,10 +94,10 @@ Hollis is composed of three primary cognitive layers:
     * **VAD:** Detects voice activity and meaningful transient sounds (claps, knocks).
     * **Briefing:** Summarizes the "Atmosphere" (noise floor, chaos level).
 
-3.  **The Cortex (Brain):**
+3.  **The Cortex (Brain-stem):**
     * **Entity Resolution:** Uses cosine similarity on spectral fingerprints to identify if the person speaking is a known "Entity" or a new guest.
-    * **Discourse Analysis:** Aggregates transcripts to summarize the topic of conversation.
-    * **Situation Room:** Maintains a high-level key-value store of the current reality (Occupancy, Atmosphere, Discourse).
+    * **Emission:** Every resolved transcript is stored and proposed to the agent executive as a perception (see below) — conclusions are drawn there, not here.
+    * **Situation Room:** Maintains a procedural key-value picture of the current reality (Occupancy, Atmosphere).
 
 ## 👂 The Agent Sensor (plugin posture)
 
