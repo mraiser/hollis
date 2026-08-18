@@ -1,47 +1,125 @@
 DataObject::new()
 }
 
+// ── Tier 1 ear discovery ─────────────────────────────────────────────
+// The link map is DERIVED, not hardcoded: the AEC reference is the
+// default sink's monitor (that is where the calibration chirp and all
+// playback goes, so it is what the canceller must subtract), and every
+// alsa_input capture port becomes a mic in stable sorted order. Two
+// botd keys (runtime/hollis/botd.properties) override it:
+//   links=src>dst;src>dst;...  the full explicit map. dst may be a bare
+//     aggregate channel (FL FR FC LFE RL RR SL) or a full port name.
+//   ignore=substr,substr,...   capture ports to skip in discovery.
+// Only LOCALIZATION cares which mic lands in which slot - transcripts
+// and voiceprints work in any order. Pin with links= when geometry
+// matters. Pure and separable so the mapping is testable without audio
+// hardware.
+pub fn resolve_links(ports: &str, default_sink: &str, links_cfg: &str, ignore_cfg: &str) -> Vec<(String, String)> {
+    let agg = |ch: &str| format!("hollis_aggregate:playback_{}", ch);
+    if !links_cfg.trim().is_empty() {
+        return links_cfg.split(';')
+            .filter_map(|pair| {
+                let (src, dst) = pair.split_once('>')?;
+                let (src, dst) = (src.trim(), dst.trim());
+                if src.is_empty() || dst.is_empty() { return None; }
+                Some((src.to_string(),
+                      if dst.contains(':') { dst.to_string() } else { agg(dst) }))
+            })
+            .collect();
+    }
+    let mut out = Vec::new();
+    let mut monitors: Vec<&str> = ports.lines().map(str::trim)
+        .filter(|l| !default_sink.is_empty()
+            && l.starts_with(&format!("{}:monitor_", default_sink)))
+        .collect();
+    monitors.sort();
+    for (port, ch) in monitors.iter().zip(["FL", "FR"]) {
+        out.push((port.to_string(), agg(ch)));
+    }
+    if monitors.is_empty() {
+        println!("[ARRAY] no monitor ports on default sink {:?} - echo cancellation runs without a reference", default_sink);
+    }
+    let ignores: Vec<&str> = ignore_cfg.split(',').map(str::trim)
+        .filter(|s| !s.is_empty()).collect();
+    let mut mics: Vec<&str> = ports.lines().map(str::trim)
+        .filter(|l| l.starts_with("alsa_input.") && l.contains(":capture_"))
+        .filter(|l| !ignores.iter().any(|ig| l.contains(ig)))
+        .collect();
+    mics.sort();
+    let slots = ["FC", "LFE", "RL", "RR", "SL"];
+    for (i, port) in mics.iter().enumerate() {
+        if i < slots.len() {
+            out.push((port.to_string(), agg(slots[i])));
+        } else {
+            println!("[ARRAY] array full - not assigned: {}", port);
+        }
+    }
+    if mics.len() < slots.len() {
+        println!("[ARRAY] {} of {} mic slots filled; the rest stay silent", mics.len(), slots.len());
+    }
+    out
+}
+
 pub fn setup_hardware_routing() {
     println!("--- Initializing Headless Hardware Routing ---");
-    
-    let check = std::process::Command::new("pw-link").arg("-o").output().unwrap();
-    let output = String::from_utf8_lossy(&check.stdout);
-    
-    if !output.contains("hollis_aggregate") {
+
+    let ports = match std::process::Command::new("pw-link").arg("-o").output() {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+        Err(e) => {
+            println!("[ARRAY] pw-link not runnable ({}) - install pipewire's tools; the array gets no inputs", e);
+            return;
+        }
+    };
+
+    if !ports.contains("hollis_aggregate") {
         println!("Building 7-channel 3D Array...");
-        let _ = std::process::Command::new("pactl")
+        let ok = std::process::Command::new("pactl")
             .args([
-                "load-module", 
-                "module-null-sink", 
-                "media.class=Audio/Sink", 
-                "sink_name=hollis_aggregate", 
+                "load-module",
+                "module-null-sink",
+                "media.class=Audio/Sink",
+                "sink_name=hollis_aggregate",
                 "channel_map=front-left,front-right,front-center,lfe,rear-left,rear-right,side-left"
             ])
             .status();
+        match ok {
+            Ok(s) if s.success() => {}
+            Ok(s) => println!("[ARRAY] pactl load-module failed (exit {:?}) - is the PipeWire pulse shim up? (pactl info)", s.code()),
+            Err(e) => println!("[ARRAY] pactl not runnable ({}) - install the pulseaudio client tools; the array cannot exist", e),
+        }
         std::thread::sleep(std::time::Duration::from_millis(1500));
     }
-    
-    println!("Patching physical hardware to the array...");
-    let links = vec![
-        ("alsa_output.usb-Generic_USB_Audio-00.HiFi_7_1__Speaker__sink:monitor_FL", "hollis_aggregate:playback_FL"),
-        ("alsa_output.usb-Generic_USB_Audio-00.HiFi_7_1__Speaker__sink:monitor_FR", "hollis_aggregate:playback_FR"),
-        ("alsa_input.usb-Generic_Blue_Microphones_LT_210915032721AD02002E_111000-00.analog-stereo:capture_FL", "hollis_aggregate:playback_FC"),
-        ("alsa_input.usb-Generic_Blue_Microphones_LT_210915032721AD02002E_111000-00.analog-stereo:capture_FR", "hollis_aggregate:playback_LFE"),
-        ("alsa_input.usb-Andrea_Electronics_Andrea_PureAudio-00.analog-stereo:capture_FL", "hollis_aggregate:playback_RL"),
-        ("alsa_input.usb-Andrea_Electronics_Andrea_PureAudio-00.analog-stereo:capture_FR", "hollis_aggregate:playback_RR"),
-        ("alsa_input.usb-HD_Camera_Manufacturer_HD_USB_Camera_SN0047-03.mono-fallback:capture_MONO", "hollis_aggregate:playback_SL"), 
-    ];
 
-    println!("Patching physical hardware to the array...");
-    for (src, dest) in links {
-        let out = std::process::Command::new("pw-link").arg(src).arg(dest).output().unwrap();
-        let err = String::from_utf8_lossy(&out.stderr);
-        
-        // If there's an error, and it's NOT just telling us it's already plugged in, scream about it!
-        if !err.is_empty() && !err.contains("File exists") {
-            println!("  [FAIL] {} -> {}: {}", src, dest, err.trim());
-        } else if err.is_empty() {
-            println!("  [ OK ] {} -> {}", src, dest);
+    // the overrides ride runtime/hollis/botd.properties
+    let (links_cfg, ignore_cfg) = (|| -> Option<(String, String)> {
+        let g = flowlang::datastore::DataStore::globals();
+        let meta = g.try_get_object("system").ok()?
+            .try_get_object("apps").ok()?
+            .try_get_object("hollis").ok()?
+            .try_get_object("runtime").ok()?;
+        Some((meta.try_get_string("links").unwrap_or_default(),
+              meta.try_get_string("ignore").unwrap_or_default()))
+    })().unwrap_or_default();
+
+    let default_sink = std::process::Command::new("pactl")
+        .args(["get-default-sink"]).output().ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    let links = resolve_links(&ports, &default_sink, &links_cfg, &ignore_cfg);
+    println!("Patching {} inputs to the array{}...", links.len(),
+        if links_cfg.trim().is_empty() { " (discovered; pin with links= in botd)" } else { " (links= from botd)" });
+    for (src, dest) in &links {
+        match std::process::Command::new("pw-link").arg(src).arg(dest).output() {
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr);
+                if !err.is_empty() && !err.contains("File exists") {
+                    println!("  [FAIL] {} -> {}: {}", src, dest, err.trim());
+                } else {
+                    println!("  [ OK ] {} -> {}", src, dest);
+                }
+            }
+            Err(e) => println!("  [FAIL] {} -> {}: pw-link: {}", src, dest, e),
         }
     }
 }
@@ -116,7 +194,10 @@ impl MasterSensorArray {
             ])
             .stdout(std::process::Stdio::piped())
             .spawn()
-            .expect("CRITICAL: Failed to spawn parec.");
+            .map_err(|e| format!(
+                "could not spawn parec ({}) - install the pulseaudio client \
+                 tools (NixOS: pulseaudio in the shell env; Debian/Ubuntu: \
+                 pulseaudio-utils)", e))?;
             
         let mut stdout = child.stdout.take().unwrap();
         

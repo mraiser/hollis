@@ -69,6 +69,8 @@ Configuration is handled in `runtime/hollis/botd.properties`. The system will ge
 | `mic2` | Name (partial match) of the secondary/right microphone. | *(None)* |
 | `mic_distance` | Distance between microphones in meters (for spatial math). | `0.6` |
 | `memory_file` | Filename for the JSON entity database. | `hollis_memory.json` |
+| `links` | Explicit array map, `src>dst;src>dst;...` in `pw-link` port names (dst may be a bare channel `FL FR FC LFE RL RR SL` or a full port name). **Empty = auto-discovery**: the default sink's monitor becomes the echo-cancellation reference and every `alsa_input` capture port becomes a mic in stable sorted order. Pin this only when localization geometry matters — transcripts and voiceprints work in any order. | *(discover)* |
+| `ignore` | Comma-separated substrings; capture ports matching any are skipped during discovery. | *(none)* |
 
 ### 🧠 LLM Configuration
 
