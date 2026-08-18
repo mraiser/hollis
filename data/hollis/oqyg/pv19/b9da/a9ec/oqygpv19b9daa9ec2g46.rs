@@ -106,8 +106,6 @@ pub struct Cortex {
   state: WorldState,
   history: HashMap<u64, Entity>,
   next_entity_id: u64, 
-  conversation_buffer: Vec<(u64, u64, String)>,
-  last_transcript_time: u64,
   store: DataStore,
   event_tx: crossbeam_channel::Sender<SemanticEvent>,  
 }
@@ -128,8 +126,6 @@ impl Cortex {
         },
         history: loaded_history,
         next_entity_id: next_id,
-        conversation_buffer: Vec::new(),
-        last_transcript_time: 0,
         store,
         event_tx,
       };
@@ -213,7 +209,9 @@ impl Cortex {
         // 3. Save to DataStore! 
         self.store.set_data("hollis_transcripts", &now.to_string(), envelope);
 
-        self.analyze_transcript(entity_id, text.clone());
+        // Understanding is the executive's job (perception-contract:
+        // ContextUpdate briefings retired) - the sensor stores the
+        // transcript and proposes it below; it draws no conclusions.
 
         // Phase 9 (docs/perception-contract.md section 5): propose the
         // utterance to the agent executive - fire-and-forget on a thread
@@ -244,93 +242,6 @@ impl Cortex {
     }
 
     self.update_occupancy_context();
-  }
-
-  fn analyze_transcript(&mut self, entity_id: u64, text: String) {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
-    let window_duration = 300_000_000; // 5 Minutes
-
-    // 1. Add to buffer (Raw Data)
-    self.conversation_buffer.push((now, entity_id, text));
-
-    // 2. Sliding Window Pruning
-    self.conversation_buffer.retain(|(ts, _, _)| now - *ts < window_duration);
-
-    // 3. Generate Briefing
-    self.generate_discourse_briefing();
-  }
-
-  fn generate_discourse_briefing(&mut self) {
-    if self.conversation_buffer.is_empty() { return; }
-
-    // 1. Analyze Dynamics (Who is here?)
-    let mut participants: Vec<u64> = self.conversation_buffer.iter().map(|(_, id, _)| *id).collect();
-    participants.sort();
-    participants.dedup();
-
-    let speaker_count = participants.len();
-    let dynamic_type = match speaker_count {
-      1 => "Monologue (Single Speaker)",
-      2 => "Dialogue (Two Speakers)",
-      _ => "Group Discussion",
-    };
-
-    // 2. Reconstruct Transcript with LATEST Labels
-    let transcript_block = self.conversation_buffer.iter()
-    .map(|(_, id, text)| {
-      let label = self.state.entities.get(id)
-      .map(|e| {
-        if e.label == "Sustained" || e.label == "Speaker" || e.label == "Unknown" {
-          format!("Entity #{}", id)
-        } else {
-          e.label.clone()
-        }
-      })
-      .unwrap_or(format!("Entity #{}", id));
-      format!("{}: {}", label, text)
-    })
-    .collect::<Vec<String>>()
-    .join("\n");
-
-    // println!(">>> GENERATING DISCOURSE BRIEFING ({}, {} lines)...", dynamic_type, self.conversation_buffer.len());
-
-    // 3. Ask LLM
-    let system_prompt = format!(
-      "You are the cognitive center of an intelligent system. \
-      Analyze the following recent conversation (last 5 minutes). \
-      Context: This is a {}. \
-      Summarize the active topic, intent, or ongoing activity in one concise sentence. \
-      If the conversation seems fragmented or over, say 'No active topic'.", 
-      dynamic_type
-    );
-
-    let prompt = format!("TRANSCRIPT:\n{}\n\nCURRENT CONTEXT:", transcript_block);
-    let event_tx = self.event_tx.clone(); // Clone the channel for the thread
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_micros() as u64;
-
-    // Fire and forget! The Cortex loop keeps running instantly.
-    thread::spawn(move || {
-      if let Ok(api) = std::panic::catch_unwind(|| crate::api::new()) {
-        let response = ask_llm(prompt, Data::DString(system_prompt));
-        let summary = response.trim().to_string();
-
-        // Send the result back to the Cortex main loop via the event channel
-        let _ = event_tx.send(SemanticEvent {
-          start_timestamp: now,
-          end_timestamp: None,
-          sources: vec!["llm_reasoning".to_string()],
-          kind: EventKind::ContextUpdate(ContextBriefing {
-            domain: "Discourse".to_string(),
-            summary,
-            confidence: 0.9,
-            urgency: 1,
-            timestamp: now,
-          }),
-          fingerprint: vec![],
-          location: None,
-        });
-      }
-    });
   }
 
   fn update_entity_stats(entity: &mut Entity, event: &SemanticEvent) {
@@ -581,11 +492,7 @@ impl Cortex {
             // Flush the updated survivor to disk immediately
             save_entity_to_datastore(&self.store, survivor);
         }
-        
-        // Update the live LLM context buffer so Discourse Briefings are accurate
-        for entry in &mut self.conversation_buffer {
-            if entry.1 == duplicate_id { entry.1 = survivor_id; }
-        }
+
     }
   }
   

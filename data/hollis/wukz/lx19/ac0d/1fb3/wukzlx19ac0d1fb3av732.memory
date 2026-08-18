@@ -40,5 +40,12 @@
     "tags": "hollis,sensor,discovery,tier1",
     "confidence": "high",
     "time": 1787010892274
+  },
+  {
+    "claim": "Hollis has no LLM (2026-08-17): the donor-era ask_llm command (GEMINI/OLLAMA arms) and the cortex discourse-briefing machinery (conversation_buffer, analyze_transcript, generate_discourse_briefing, the llm_reasoning ContextUpdate) are DELETED, resolving the architecture duplication the perception contract had already ruled on (ContextUpdate retired: briefings were the vestigial cortex conclusions; conclusions are the executive job). The sensor is purely procedural: store the transcript, resolve the entity, emit the perception. The Situation Room keeps only procedural context (Occupancy, Atmosphere). The crash that forced the decision: first live transcript on the owner box panicked in ask_gemini on a missing GEMINI_API_KEY - the sensor was reaching for its own frontier when the agent already owns that road.",
+    "detail": "delete_command removes the store record but NOT the generated src - the orphaned <cmd>.rs and its mod.rs lines must be hand-aligned (what the next regen would produce) or the dead code ships. Also this session: first live hardware validation of Tier 1 discovery + Phase 9 end-to-end (real utterance transcribed, emitted).",
+    "tags": "hollis,sensor,llm-removal,architecture",
+    "confidence": "high",
+    "time": 1787012434061
   }
 ]
