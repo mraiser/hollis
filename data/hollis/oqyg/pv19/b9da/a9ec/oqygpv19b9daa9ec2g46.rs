@@ -108,6 +108,11 @@ pub struct Cortex {
   next_entity_id: u64, 
   store: DataStore,
   event_tx: crossbeam_channel::Sender<SemanticEvent>,  
+  // H4c coalescing state: one perception per state SHIFT, never per
+  // frame (contract section 6 rubric). Keyed "event:entity:label" ->
+  // last-emit timestamp (us); cadence tracks its last state string.
+  recent_emits: HashMap<String, u64>,
+  last_cadence: String,
 }
 
 impl Cortex {
@@ -128,6 +133,8 @@ impl Cortex {
         next_entity_id: next_id,
         store,
         event_tx,
+        recent_emits: HashMap::new(),
+        last_cadence: String::new(),
       };
 
       println!("Cortex Online. Known Entities: {}", cortex.history.len());
@@ -226,7 +233,7 @@ impl Cortex {
             format!("Entity #{}", entity_id)
           } else { elabel };
           thread::spawn(move || {
-            let _ = crate::hollis::audio::inject::emit_acoustic_perception("transcript", &etext, &elabel, 0.7);
+            let _ = crate::hollis::audio::inject::emit_acoustic_perception("transcript", &etext, &elabel, 0.7, "");
           });
         }
       },
@@ -235,13 +242,122 @@ impl Cortex {
         // We map the briefing by its domain (e.g., "Atmosphere")
         self.state.context.insert(briefing.domain.clone(), briefing);
       },
-      _ => {
-        // Catch-all for Transients/Continuous (or just log them)
-        println!("{}: {:?}", entity_id, event.kind);
+      other => {
+        // H4c: the low levels reach the executive at the granularity
+        // of MEANING, not volume (perception-contract section 6
+        // rubric). Every arm goes through the one emit path with a
+        // coalescing rule and a per-event runtime gate
+        // (emit_<event>=on|off beside the master emit switch;
+        // defaults are owner call 6's proposal). Payloads are
+        // observations only; hints are honest priors.
+        self.emit_low_level(entity_id, now, &other);
       }
     }
 
     self.update_occupancy_context();
+  }
+
+  // per-event emit gate; defaults per owner call 6: ambience_shift,
+  // state_change, transient ON (located enforced at the emit site);
+  // continuous ON but start-only by construction; micro_transient and
+  // cadence OFF until turned on.
+  fn event_gate(event: &str) -> bool {
+    let dflt = match event {
+      "ambience_shift" | "state_change" | "transient" | "continuous" => true,
+      _ => false,
+    };
+    let g = DataStore::globals();
+    if g.has("system") {
+      let sys = g.get_object("system");
+      if sys.has("apps") && sys.get_object("apps").has("hollis") {
+        let happ = sys.get_object("apps").get_object("hollis");
+        if happ.has("runtime") {
+          let rt = happ.get_object("runtime");
+          let key = format!("emit_{}", event);
+          if rt.has(&key) { return rt.get_string(&key) != "off"; }
+        }
+      }
+    }
+    dflt
+  }
+
+  fn emit_low_level(&mut self, entity_id: u64, now: u64, kind: &EventKind) {
+    // the entity's label and location, if it has earned them; the
+    // origin means "not located" (the tracker's default position)
+    let (elabel, loc) = match self.state.entities.get(&entity_id) {
+      Some(e) => {
+        let l = if e.label.starts_with("Entity #") || e.label == "Sustained"
+            || e.label == "Speaker" || e.label == "Unknown" {
+          format!("Entity #{}", entity_id)
+        } else { e.label.clone() };
+        let located = e.position.x != 0.0 || e.position.y != 0.0 || e.position.z != 0.0;
+        (l, if located { Some((e.position.x, e.position.y, e.position.z)) } else { None })
+      }
+      None => (format!("Entity #{}", entity_id), None),
+    };
+    let loc_json = |loc: &Option<(f32, f32, f32)>| -> String {
+      match loc {
+        Some((x, y, z)) => format!(", \"location\": [{:.2}, {:.2}, {:.2}]", x, y, z),
+        None => String::new(),
+      }
+    };
+    // (event name, coalesce key, window us, hint, extra json) - or a
+    // silent return where the rule says zero perceptions
+    let (event, key, window_us, hint, extra): (&str, String, u64, f64, String) = match kind {
+      EventKind::Transient { label, confidence, peak_db } => {
+        // located transients only (call 6): an unlocated bang is
+        // indistinguishable from sensor noise at perception grade
+        if loc.is_none() { return; }
+        ("transient", format!("transient:{}:{}", entity_id, label), 30_000_000, 0.35,
+         format!("{{\"label\": \"{}\", \"confidence\": {:.2}, \"db\": {:.1}{}}}",
+                 label.replace('"', ""), confidence, peak_db, loc_json(&loc)))
+      }
+      EventKind::MicroTransient { label, peak_db, margin } => {
+        ("micro_transient", format!("micro:{}:{}", entity_id, label), 60_000_000, 0.15,
+         format!("{{\"label\": \"{}\", \"db\": {:.1}, \"confidence\": {:.2}{}}}",
+                 label.replace('"', ""), peak_db, 1.0 - margin, loc_json(&loc)))
+      }
+      EventKind::Continuous { label, is_speech } => {
+        // a source STARTING is one event; a source running is zero -
+        // the long window is the re-arm, not a repeat cadence
+        ("continuous", format!("continuous:{}:{}", entity_id, label), 300_000_000, 0.35,
+         format!("{{\"label\": \"{}\", \"confidence\": {}{}}}",
+                 label.replace('"', ""), if *is_speech { "0.9" } else { "0.6" }, loc_json(&loc)))
+      }
+      EventKind::AmbienceShift { delta_db, new_floor_db } => {
+        // already a shift by construction; the short window only
+        // guards a flapping detector
+        ("ambience_shift", "ambience".to_string(), 10_000_000, 0.3,
+         format!("{{\"delta_db\": {:.1}, \"db\": {:.1}}}", delta_db, new_floor_db))
+      }
+      EventKind::StateChange { previous_db, current_db } => {
+        ("state_change", "state".to_string(), 10_000_000, 0.3,
+         format!("{{\"delta_db\": {:.1}, \"db\": {:.1}}}",
+                 current_db - previous_db, current_db))
+      }
+      EventKind::CadenceUpdate { state, duration_ms } => {
+        // one perception per cadence STATE CHANGE, never per update
+        let s = format!("{:?}", state);
+        if s == self.last_cadence { return; }
+        self.last_cadence = s.clone();
+        ("cadence", "cadence".to_string(), 0, 0.2,
+         format!("{{\"label\": \"{}\", \"duration_ms\": {}}}", s, duration_ms))
+      }
+      _ => return,
+    };
+    if !Self::event_gate(event) { return; }
+    if window_us > 0 {
+      if let Some(last) = self.recent_emits.get(&key) {
+        if now.saturating_sub(*last) < window_us { return; }
+      }
+    }
+    self.recent_emits.insert(key, now);
+    if self.recent_emits.len() > 512 { self.recent_emits.clear(); }
+    let ev = event.to_string();
+    let el = elabel.clone();
+    thread::spawn(move || {
+      let _ = crate::hollis::audio::inject::emit_acoustic_perception(&ev, "", &el, 0.0f64.max(hint), &extra);
+    });
   }
 
   fn update_entity_stats(entity: &mut Entity, event: &SemanticEvent) {
