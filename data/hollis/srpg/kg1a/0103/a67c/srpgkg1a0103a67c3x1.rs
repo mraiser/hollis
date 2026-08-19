@@ -4,7 +4,7 @@
 // test and demo surface for boxes with no microphones attached.
 // This file is also the home of emit_acoustic_perception, the single
 // shared emit path (the cortex's Transcript arm calls it on a thread).
-emit_acoustic_perception("transcript", &text, &entity, 0.9)
+emit_acoustic_perception("transcript", &text, &entity, 0.9, "")
 }
 
 // The hollis sensor's one emit path: wrap a semantic event in a v1
@@ -13,7 +13,11 @@ emit_acoustic_perception("transcript", &text, &entity, 0.9)
 // agent.executive.perceive. Call from a spawned thread when the caller
 // must not block. A missing agent library is a counted skip, never an
 // error - hollis runs standalone by design.
-pub fn emit_acoustic_perception(event: &str, text: &str, entity: &str, hint: f64) -> DataObject {
+pub fn emit_acoustic_perception(event: &str, text: &str, entity: &str, hint: f64, extra: &str) -> DataObject {
+  // `extra` (H4c): the contract's low-level payload fields as a JSON
+  // object string - label, db, delta_db, confidence, duration_ms,
+  // location - merged into the payload verbatim. A String because the
+  // cortex emits from spawned threads: primitives cross, handles don't.
   let mut g = DataStore::globals();
   let mut hs = if g.has("HOLLIS_SENSOR") { g.get_object("HOLLIS_SENSOR") } else {
     let mut o = DataObject::new();
@@ -49,6 +53,13 @@ pub fn emit_acoustic_perception(event: &str, text: &str, entity: &str, hint: f64
   payload.put_string("event", event);
   if text != "" { payload.put_string("text", text); }
   if entity != "" { payload.put_string("entity", entity); }
+  if extra != "" {
+    if let Ok(x) = DataObject::try_from_string(extra) {
+      for k in x.clone().keys() {
+        payload.set_property(&k, x.get_property(&k));
+      }
+    }
+  }
   let mut envl = DataObject::new();
   envl.put_int("v", 1);
   envl.put_string("kind", "acoustic_event");
