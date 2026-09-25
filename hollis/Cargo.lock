@@ -465,9 +465,9 @@ dependencies = [
 
 [[package]]
 name = "flowlang"
-version = "0.3.34"
+version = "0.3.38"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c89404514aa421c456f5055bbe598a59746fa2904716afa7009f5a926e2910e1"
+checksum = "6515f9f4d1c8a02d369722ea200dc79101f0e6ec600978c3d0289062de4613f8"
 dependencies = [
  "libc",
  "ndata",
